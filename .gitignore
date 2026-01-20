@@ -120,3 +120,4 @@ build-mac/build_version.cc
 build-mac/cmake_install.cmake
 _codeql_detected_source_root
 
+rpc_data

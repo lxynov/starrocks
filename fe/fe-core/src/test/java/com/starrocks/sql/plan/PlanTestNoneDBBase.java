@@ -89,7 +89,13 @@ public class PlanTestNoneDBBase extends StarRocksTestBase {
         // create connect context
         connectContext = UtFrameUtils.createDefaultCtx();
         starRocksAssert = new StarRocksAssert(connectContext);
-        connectContext.getSessionVariable().setOptimizerExecuteTimeout(30000);
+        // Use a long timeout so that debugging with breakpoints does not trigger planner timeout
+        // (optimizer uses wall-clock time). Also set default so inner contexts (e.g. statistics
+        // daemon) get it and do not throw while tests run.
+        long optimizerTimeoutMs = 300 * 1000L; // 5 minutes
+        GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultSessionVariable()
+                .setOptimizerExecuteTimeout(optimizerTimeoutMs);
+        connectContext.getSessionVariable().setOptimizerExecuteTimeout(optimizerTimeoutMs);
         connectContext.getSessionVariable().setUseLowCardinalityOptimizeV2(false);
         connectContext.getSessionVariable().setCboEqBaseType(SessionVariableConstants.VARCHAR);
         connectContext.getSessionVariable().setUseCorrelatedPredicateEstimate(false);

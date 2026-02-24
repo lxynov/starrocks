@@ -76,11 +76,13 @@ public class MergeProjectWithChildRule extends TransformationRule {
         ColumnRefSet projectColumns = logicalProjectOperator.getOutputColumns(
                 new ExpressionContext(input));
         ColumnRefSet childOutputColumns = child.getOutputColumns(new ExpressionContext(input.inputAt(0)));
-        if (projectColumns.equals(childOutputColumns) && eliminateUselessProject) {
+        if (projectColumns.equals(childOutputColumns) && eliminateUselessProject
+                && logicalProjectOperator.getCommonSubOperatorMap().isEmpty()) {
             return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
         }
 
-        builder.setProjection(new Projection(logicalProjectOperator.getColumnRefMap()));
+        builder.setProjection(new Projection(logicalProjectOperator.getColumnRefMap(),
+                logicalProjectOperator.getCommonSubOperatorMap()));
 
         return Lists.newArrayList(OptExpression.create(builder.build(), input.inputAt(0).getInputs()));
     }

@@ -552,6 +552,11 @@ public class ScalarOperatorsReuse {
 
             Map<ColumnRefOperator, ScalarOperator> newCommonMap =
                     Maps.newTreeMap(Comparator.comparingInt(ColumnRefOperator::getId));
+            // Preserve existing common sub-expression entries (e.g. from MergeTwoProjectRule).
+            // Existing entries have lower column ref IDs, so they sort first in the TreeMap,
+            // which ensures PlanFragmentBuilder evaluates them before newly discovered CSEs
+            // that may reference them.
+            newCommonMap.putAll(projection.getCommonSubOperatorMap());
             for (Map.Entry<ScalarOperator, ColumnRefOperator> kv : commonSubOperators.entrySet()) {
                 Preconditions.checkState(!newMap.containsKey(kv.getValue()));
                 ScalarOperator rewrittenOperator = rewriter.rewrite(kv.getKey(), rules);

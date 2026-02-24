@@ -31,6 +31,7 @@ import com.starrocks.sql.optimizer.rule.RuleType;
 import com.starrocks.type.IntegerType;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -63,14 +64,41 @@ public class PruneProjectColumnsRule extends TransformationRule {
             }
         }));
 
+        // Transitively keep common sub-expression entries that are referenced by kept output columns.
+        Map<ColumnRefOperator, ScalarOperator> existingCommonSub = projectOperator.getCommonSubOperatorMap();
+        Map<ColumnRefOperator, ScalarOperator> newCommonSubMap = new LinkedHashMap<>();
+        if (!existingCommonSub.isEmpty()) {
+            ColumnRefSet referencedCols = new ColumnRefSet();
+            for (ScalarOperator op : newMap.values()) {
+                referencedCols.union(op.getUsedColumns());
+            }
+            boolean changed = true;
+            while (changed) {
+                changed = false;
+                for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : existingCommonSub.entrySet()) {
+                    if (!newCommonSubMap.containsKey(entry.getKey())
+                            && referencedCols.contains(entry.getKey())) {
+                        newCommonSubMap.put(entry.getKey(), entry.getValue());
+                        referencedCols.union(entry.getValue().getUsedColumns());
+                        changed = true;
+                    }
+                }
+            }
+            for (ScalarOperator op : newCommonSubMap.values()) {
+                requiredInputColumns.union(op.getUsedColumns());
+            }
+            requiredInputColumns.except(newCommonSubMap.keySet());
+        }
+
         if (newMap.isEmpty()) {
             ColumnRefOperator constCol = context.getColumnRefFactory()
                     .create("auto_fill_col", IntegerType.TINYINT, false);
             newMap.put(constCol, ConstantOperator.createTinyInt((byte) 1));
-        } else if (newMap.equals(projectOperator.getColumnRefMap()) && context.getOptimizerOptions().isShortCircuit()) {
-            // Change the requiredOutputColumns in context
+            newCommonSubMap.clear();
+        } else if (newMap.equals(projectOperator.getColumnRefMap())
+                && newCommonSubMap.equals(existingCommonSub)
+                && context.getOptimizerOptions().isShortCircuit()) {
             requiredOutputColumns.union(requiredInputColumns);
-            // make sure this rule only executed once
             return Collections.emptyList();
         }
 
@@ -78,7 +106,10 @@ public class PruneProjectColumnsRule extends TransformationRule {
         requiredOutputColumns.union(requiredInputColumns);
 
         return Lists.newArrayList(OptExpression.create(
-                LogicalProjectOperator.builder().withOperator(projectOperator).setColumnRefMap(newMap).build(),
+                LogicalProjectOperator.builder().withOperator(projectOperator)
+                        .setColumnRefMap(newMap)
+                        .setCommonSubOperatorMap(newCommonSubMap)
+                        .build(),
                 input.getInputs()));
     }
 }

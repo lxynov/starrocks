@@ -63,9 +63,11 @@ public class OptExpressionValidator extends OptExpressionVisitor<OptExpression, 
     @Override
     public OptExpression visitLogicalProject(OptExpression optExpression, Void context) {
         if (needValidate) {
-            Map<ColumnRefOperator, ScalarOperator> map = ((LogicalProjectOperator) optExpression.getOp())
-                    .getColumnRefMap();
-            validateProjectionMap(map);
+            LogicalProjectOperator projectOp = (LogicalProjectOperator) optExpression.getOp();
+            validateProjectionMap(projectOp.getColumnRefMap());
+            if (!projectOp.getCommonSubOperatorMap().isEmpty()) {
+                validateProjectionMap(projectOp.getCommonSubOperatorMap());
+            }
         }
         validateChildOpt(optExpression);
         return optExpression;

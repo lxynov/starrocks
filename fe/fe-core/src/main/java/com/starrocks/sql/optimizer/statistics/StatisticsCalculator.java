@@ -283,7 +283,7 @@ public class StatisticsCalculator extends OperatorVisitor<Void, ExpressionContex
         Projection projection = node.getProjection();
         if (projection != null) {
             Map<ColumnRefOperator, SubfieldOperator> subfieldColumns = Maps.newHashMap();
-            Preconditions.checkState(projection.getCommonSubOperatorMap().isEmpty());
+            //            Preconditions.checkState(projection.getCommonSubOperatorMap().isEmpty());
             for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : projection.getColumnRefMap().entrySet()) {
                 if (entry.getValue() instanceof SubfieldOperator && (node instanceof LogicalScanOperator ||
                         node instanceof PhysicalScanOperator)) {

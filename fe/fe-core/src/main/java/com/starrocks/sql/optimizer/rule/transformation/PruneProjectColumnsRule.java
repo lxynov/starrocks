@@ -77,8 +77,11 @@ public class PruneProjectColumnsRule extends TransformationRule {
         // Change the requiredOutputColumns in context
         requiredOutputColumns.union(requiredInputColumns);
 
-        return Lists.newArrayList(OptExpression.create(
-                LogicalProjectOperator.builder().withOperator(projectOperator).setColumnRefMap(newMap).build(),
-                input.getInputs()));
+        LogicalProjectOperator newProjectOperator =
+                new LogicalProjectOperator(newMap, projectOperator.getSubColumnRefMap(), projectOperator.getLimit());
+
+        newProjectOperator.compactSubColumnRefMap();
+
+        return Lists.newArrayList(OptExpression.create(newProjectOperator, input.getInputs()));
     }
 }

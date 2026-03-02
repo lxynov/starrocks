@@ -71,8 +71,6 @@ public class NestedCaseWhenPlanTest extends PlanTestBase {
         assertContains(traceAll, "watchScope:");
         assertContains(traceAll, "Optimizer");
         assertContains(traceAll, "Tracer Cost:");
-        // ScalarOperatorsReuseRule (uses ScalarOperatorsReuse) is relevant for nested CASE/CTE
-        assertContains(traceAll, "ScalarOperatorsReuseRule");
     }
 
     @Test

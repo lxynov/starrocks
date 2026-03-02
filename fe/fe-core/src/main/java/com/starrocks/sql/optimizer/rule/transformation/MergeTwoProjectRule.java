@@ -15,18 +15,13 @@
 package com.starrocks.sql.optimizer.rule.transformation;
 
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.operator.OperatorType;
 import com.starrocks.sql.optimizer.operator.logical.LogicalProjectOperator;
 import com.starrocks.sql.optimizer.operator.pattern.Pattern;
-import com.starrocks.sql.optimizer.operator.scalar.CallOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ColumnRefOperator;
 import com.starrocks.sql.optimizer.operator.scalar.ScalarOperator;
-import com.starrocks.sql.optimizer.rewrite.ReplaceColumnRefRewriter;
-import com.starrocks.sql.optimizer.rewrite.ScalarOperatorRewriter;
 import com.starrocks.sql.optimizer.rule.RuleType;
 
 import java.util.List;
@@ -44,36 +39,37 @@ public class MergeTwoProjectRule extends TransformationRule {
         LogicalProjectOperator firstProject = (LogicalProjectOperator) input.getOp();
         LogicalProjectOperator secondProject = (LogicalProjectOperator) input.getInputs().get(0).getOp();
 
-        ScalarOperatorRewriter scalarRewriter = new ScalarOperatorRewriter();
-        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(secondProject.getColumnRefMap());
-        Map<ColumnRefOperator, ScalarOperator> resultMap = Maps.newHashMap();
-        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : firstProject.getColumnRefMap().entrySet()) {
-            ScalarOperator result = rewriter.rewrite(entry.getValue());
-            if (result.isConstant()) {
-                // better to rewrite all expression, but it's unnecessary
-                result = scalarRewriter.rewrite(result, ScalarOperatorRewriter.DEFAULT_REWRITE_RULES);
-            }
-            resultMap.put(entry.getKey(), result);
-        }
-
-        // ASSERT_TRUE must be executed in the runtime, so it should be kept anyway.
-        for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : secondProject.getColumnRefMap().entrySet()) {
-            if (entry.getValue() instanceof CallOperator) {
-                CallOperator callOp = entry.getValue().cast();
-                if (FunctionSet.ASSERT_TRUE.equals(callOp.getFnName())) {
-                    resultMap.put(entry.getKey(), entry.getValue());
-                }
-            }
-        }
-
         // minimum value of limits on projections, but have to exclude unlimited(-1) case
         long limit = Stream.of(firstProject.getLimit(), secondProject.getLimit())
                 .filter(l -> l >= 0)
                 .min(Long::compare)
                 .orElse(-1L);
 
-        OptExpression optExpression = new OptExpression(
-                new LogicalProjectOperator(resultMap, limit));
+        LogicalProjectOperator resultProject =
+                new LogicalProjectOperator(firstProject.getColumnRefMap(), firstProject.getSubColumnRefMap(), limit);
+
+        Map<ColumnRefOperator, ScalarOperator> subColumnRefMap = resultProject.getSubColumnRefMap();
+
+        Stream.concat(secondProject.getColumnRefMap().entrySet().stream(), secondProject.getSubColumnRefMap().entrySet().stream())
+                .forEach(entry -> {
+                    ColumnRefOperator colRef = entry.getKey();
+                    ScalarOperator expr = entry.getValue();
+                    if (!colRef.equals(expr)) {
+                        if (subColumnRefMap.containsKey(colRef)) {
+                            if (!subColumnRefMap.get(colRef).equals(expr)) {
+                                throw new IllegalStateException("Can't merge two projects: column " + colRef
+                                        + " has conflicting expressions: existing=" + subColumnRefMap.get(colRef)
+                                        + ", incoming=" + expr);
+                            }
+                        } else {
+                            subColumnRefMap.put(colRef, expr);
+                        }
+                    }
+                });
+
+        resultProject.compactSubColumnRefMap();
+
+        OptExpression optExpression = new OptExpression(resultProject);
         optExpression.getInputs().addAll(input.getInputs().get(0).getInputs());
         return Lists.newArrayList(optExpression);
     }

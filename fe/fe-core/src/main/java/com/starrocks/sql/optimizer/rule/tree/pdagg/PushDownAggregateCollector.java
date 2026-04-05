@@ -176,61 +176,81 @@ public class PushDownAggregateCollector extends OptExpressionVisitor<Void, Aggre
             return processChild(optExpression, context);
         }
 
-        // rewrite
-        ReplaceColumnRefRewriter rewriter = new ReplaceColumnRefRewriter(project.getColumnRefMap());
-        context.aggregations.replaceAll((k, v) -> (CallOperator) rewriter.rewrite(v));
-        context.groupBys.replaceAll((k, v) -> rewriter.rewrite(v));
+        Map<ColumnRefOperator, ScalarOperator> columnRefMap = project.getColumnRefMap();
+        Map<ColumnRefOperator, ScalarOperator> aggRewriteMap = columnRefMap;
 
-        if (project.getColumnRefMap().values().stream().allMatch(ScalarOperator::isColumnRef)) {
-            return processChild(optExpression, context);
+        if (!columnRefMap.values().stream().allMatch(ScalarOperator::isColumnRef)) {
+            // Handle CASE-WHEN/IF in projection values that feed into aggregation expressions.
+            // Process them at the projection level (before inlining) so that each project layer's
+            // conditions are handled independently, which correctly supports nested CASE/IF across
+            // multiple project operators.
+            ColumnRefSet aggUsedColumns = new ColumnRefSet();
+            context.aggregations.values().forEach(v -> aggUsedColumns.union(v.getUsedColumns()));
+
+            for (Map.Entry<ColumnRefOperator, ScalarOperator> entry : columnRefMap.entrySet()) {
+                ColumnRefOperator key = entry.getKey();
+                ScalarOperator value = entry.getValue();
+
+                if (!aggUsedColumns.contains(key) || !(value instanceof CallOperator)) {
+                    continue;
+                }
+
+                if (value instanceof CaseWhenOperator) {
+                    CaseWhenOperator caseWhen = (CaseWhenOperator) value;
+                    for (ScalarOperator condition : caseWhen.getAllConditionClause()) {
+                        condition.getUsedColumns().getStream().map(factory::getColumnRef)
+                                .forEach(v -> context.groupBys.put(v, v));
+                    }
+
+                    List<ScalarOperator> newWhenThen = Lists.newArrayList();
+                    for (int i = 0; i < caseWhen.getWhenClauseSize(); i++) {
+                        if (caseWhen.getThenClause(i).isConstant() && !caseWhen.getThenClause(i).isConstantNull()) {
+                            return visit(optExpression, context);
+                        }
+                        newWhenThen.add(ConstantOperator.createBoolean(false));
+                        newWhenThen.add(caseWhen.getThenClause(i));
+                    }
+
+                    CaseWhenOperator newCaseWhen = new CaseWhenOperator(caseWhen.getType(), null,
+                            caseWhen.hasElse() ? caseWhen.getElseClause() : null, newWhenThen);
+                    if (aggRewriteMap == columnRefMap) {
+                        aggRewriteMap = Maps.newHashMap(columnRefMap);
+                    }
+                    aggRewriteMap.put(key, newCaseWhen);
+                } else {
+                    CallOperator callOp = (CallOperator) value;
+                    if (callOp.getFunction() != null &&
+                            FunctionSet.IF.equals(callOp.getFunction().getFunctionName().getFunction())) {
+                        if (value.getChildren().stream().skip(1)
+                                .anyMatch(c -> c.isConstant() && !c.isConstantNull())) {
+                            return visit(optExpression, context);
+                        }
+
+                        value.getChild(0).getUsedColumns().getStream().map(factory::getColumnRef)
+                                .forEach(v -> context.groupBys.put(v, v));
+
+                        List<ScalarOperator> newChildren = Lists.newArrayList(value.getChildren());
+                        newChildren.set(0, ConstantOperator.createBoolean(false));
+                        CallOperator newIf = new CallOperator(callOp.getFnName(), callOp.getType(),
+                                newChildren, callOp.getFunction());
+                        if (aggRewriteMap == columnRefMap) {
+                            aggRewriteMap = Maps.newHashMap(columnRefMap);
+                        }
+                        aggRewriteMap.put(key, newIf);
+                    }
+                }
+            }
         }
 
-        // handle specials functions case-when/if
-        // split to groupBys and mock new aggregations by values, don't need to save
-        // origin predicate, we just do check in collect phase
-        for (Map.Entry<ColumnRefOperator, CallOperator> entry : context.aggregations.entrySet()) {
-            CallOperator aggFn = entry.getValue();
-            ScalarOperator aggInput = aggFn.getChild(0);
-
-            if (!(aggInput instanceof CallOperator)) {
-                continue;
-            }
-
-            CallOperator callInput = (CallOperator) aggInput;
-            if (aggInput instanceof CaseWhenOperator) {
-                CaseWhenOperator caseWhen = (CaseWhenOperator) aggInput;
-                for (ScalarOperator condition : caseWhen.getAllConditionClause()) {
-                    condition.getUsedColumns().getStream().map(factory::getColumnRef)
-                            .forEach(v -> context.groupBys.put(v, v));
-                }
-
-                List<ScalarOperator> newWhenThen = Lists.newArrayList();
-                for (int i = 0; i < caseWhen.getWhenClauseSize(); i++) {
-                    if (caseWhen.getThenClause(i).isConstant() && !caseWhen.getThenClause(i).isConstantNull()) {
-                        // forbidden push down
-                        return visit(optExpression, context);
-                    }
-                    newWhenThen.add(ConstantOperator.createBoolean(false));
-                    newWhenThen.add(caseWhen.getThenClause(i));
-                }
-
-                // mock just value case when
-                CaseWhenOperator newCaseWhen = new CaseWhenOperator(caseWhen.getType(), null,
-                        caseWhen.hasElse() ? caseWhen.getElseClause() : null, newWhenThen);
-
-                // replace origin
-                aggFn.setChild(0, newCaseWhen);
-            } else if (callInput.getFunction() != null &&
-                    FunctionSet.IF.equals(callInput.getFunction().getFunctionName().getFunction())) {
-                if (aggInput.getChildren().stream().skip(1).anyMatch(c -> c.isConstant() && !c.isConstantNull())) {
-                    // forbidden push down
-                    return visit(optExpression, context);
-                }
-
-                aggInput.getChild(0).getUsedColumns().getStream().map(factory::getColumnRef)
-                        .forEach(v -> context.groupBys.put(v, v));
-                aggInput.setChild(0, ConstantOperator.createBoolean(false));
-            }
+        // Rewrite aggregations with the (potentially modified) map where CASE/IF conditions are stripped,
+        // and rewrite group-bys with the original map to preserve conditions in group-by expressions.
+        ReplaceColumnRefRewriter aggRewriter = new ReplaceColumnRefRewriter(aggRewriteMap);
+        context.aggregations.replaceAll((k, v) -> (CallOperator) aggRewriter.rewrite(v));
+        if (aggRewriteMap != columnRefMap) {
+            ReplaceColumnRefRewriter gbRewriter = new ReplaceColumnRefRewriter(columnRefMap);
+            context.groupBys.replaceAll((k, v) -> gbRewriter.rewrite(v));
+        } else {
+            context.groupBys.replaceAll((k, v) -> aggRewriter.rewrite(v));
         }
 
         // check has constant aggregate, forbidden

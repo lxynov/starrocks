@@ -24,6 +24,7 @@ import com.starrocks.proto.StatusPB;
 import com.starrocks.qe.DefaultCoordinator;
 import com.starrocks.qe.RowBatch;
 import com.starrocks.qe.SimpleScheduler;
+import com.starrocks.qe.scheduler.dag.FragmentInstanceExecState;
 import com.starrocks.rpc.ConfigurableSerDesFactory;
 import com.starrocks.rpc.PFetchDataRequest;
 import com.starrocks.rpc.RpcException;
@@ -265,6 +266,92 @@ public class GetNextTest extends SchedulerTestBase {
             scheduler.updateFragmentExecStatus(request);
         });
         Assertions.assertTrue(scheduler.isDone());
+        Assertions.assertTrue(scheduler.getExecStatus().isCancelled());
+    }
+
+    private static void reportDoneStatus(DefaultCoordinator scheduler, FragmentInstanceExecState exec,
+                                         TStatusCode code) {
+        TReportExecStatusParams request = new TReportExecStatusParams(FrontendServiceVersion.V1);
+        request.setBackend_num(exec.getIndexInJob());
+        request.setDone(true);
+        request.setStatus(new TStatus(code));
+        request.setFragment_instance_id(exec.getInstanceId());
+        scheduler.updateFragmentExecStatus(request);
+    }
+
+    @Test
+    public void testUpdateStatusPrefersRootCauseOverCascade() throws Exception {
+        setBackendService(new MockPBackendService());
+
+        String sql = "select count(1) from lineitem";
+        DefaultCoordinator scheduler = startScheduling(sql);
+
+        List<FragmentInstanceExecState> execs = new ArrayList<>(scheduler.getExecutionDAG().getExecutions());
+        Assertions.assertTrue(execs.size() >= 2);
+
+        // A cascade CANCELLED (from the teardown of a sibling fragment) arrives first ...
+        reportDoneStatus(scheduler, execs.get(0), TStatusCode.CANCELLED);
+        // ... and the authoritative root cause arrives later. It must still win.
+        reportDoneStatus(scheduler, execs.get(1), TStatusCode.MEM_LIMIT_EXCEEDED);
+
+        Assertions.assertEquals(TStatusCode.MEM_LIMIT_EXCEEDED, scheduler.getExecStatus().getErrorCode());
+        Assertions.assertEquals(TStatusCode.MEM_LIMIT_EXCEEDED.toString(), connectContext.getNormalizedErrorCode());
+    }
+
+    @Test
+    public void testUpdateStatusPrefersRootCauseRegardlessOfOrder() throws Exception {
+        setBackendService(new MockPBackendService());
+
+        String sql = "select count(1) from lineitem";
+        DefaultCoordinator scheduler = startScheduling(sql);
+
+        List<FragmentInstanceExecState> execs = new ArrayList<>(scheduler.getExecutionDAG().getExecutions());
+        Assertions.assertTrue(execs.size() >= 2);
+
+        // Root cause first, cascade CANCELLED afterwards must not override it.
+        reportDoneStatus(scheduler, execs.get(0), TStatusCode.MEM_LIMIT_EXCEEDED);
+        reportDoneStatus(scheduler, execs.get(1), TStatusCode.CANCELLED);
+
+        Assertions.assertEquals(TStatusCode.MEM_LIMIT_EXCEEDED, scheduler.getExecStatus().getErrorCode());
+    }
+
+    @Test
+    public void testUpdateStatusFaultWinsOverCancelled() throws Exception {
+        TStatusCode[] faults = {TStatusCode.IO_ERROR, TStatusCode.DATA_QUALITY_ERROR, TStatusCode.TIMEOUT};
+        for (TStatusCode fault : faults) {
+            setBackendService(new MockPBackendService());
+
+            String sql = "select count(1) from lineitem";
+            DefaultCoordinator scheduler = startScheduling(sql);
+
+            List<FragmentInstanceExecState> execs = new ArrayList<>(scheduler.getExecutionDAG().getExecutions());
+            Assertions.assertTrue(execs.size() >= 2);
+
+            reportDoneStatus(scheduler, execs.get(0), TStatusCode.CANCELLED);
+            reportDoneStatus(scheduler, execs.get(1), fault);
+
+            Assertions.assertEquals(fault, scheduler.getExecStatus().getErrorCode(),
+                    "higher-precedence " + fault + " should win over CANCELLED");
+        }
+    }
+
+    @Test
+    public void testIntentionalCancelNotOverriddenByLateFault() throws Exception {
+        setBackendService(new MockPBackendService());
+
+        String sql = "select count(1) from lineitem";
+        DefaultCoordinator scheduler = startScheduling(sql);
+
+        // User-initiated cancellation is authoritative.
+        scheduler.cancel("Cancelled by user");
+        Assertions.assertTrue(scheduler.getExecStatus().isCancelled());
+
+        List<FragmentInstanceExecState> execs = new ArrayList<>(scheduler.getExecutionDAG().getExecutions());
+        Assertions.assertFalse(execs.isEmpty());
+
+        // A fault reported by the teardown this cancellation triggered must not override the reason.
+        reportDoneStatus(scheduler, execs.get(0), TStatusCode.MEM_LIMIT_EXCEEDED);
+
         Assertions.assertTrue(scheduler.getExecStatus().isCancelled());
     }
 

@@ -153,9 +153,19 @@ public class DefaultCoordinator extends Coordinator {
 
     /**
      * Overall status of the entire query.
-     * <p> Set to the first reported fragment error status or to CANCELLED, if {@link #cancel(String cancelledMessage)} is called.
+     * <p> Set to the highest-precedence reported fragment error status (see {@link Status#precedence}),
+     * or to CANCELLED, if {@link #cancel(PPlanFragmentCancelReason, String)} is called.
      */
     private Status queryStatus = new Status();
+
+    /**
+     * Set when the query is terminated by an intentional, coordinator-initiated action
+     * (user KILL, timeout watchdog, client disconnect, or the normal-completion internal
+     * cancels LIMIT_REACH / QUERY_FINISHED). Once set, the client-facing status is
+     * authoritative and must not be overridden by cascade faults produced by the teardown
+     * that this cancellation itself triggered.
+     */
+    private boolean authoritativeCancel = false;
 
     private PQueryStatistics auditStatistics;
 
@@ -916,12 +926,26 @@ public class DefaultCoordinator extends Coordinator {
                 return;
             }
 
-            // don't override an error status; also, cancellation has already started
-            if (!queryStatus.ok()) {
+            // An intentional, coordinator-initiated cancellation (KILL / timeout / LIMIT_REACH /
+            // QUERY_FINISHED) is authoritative. Do not let a cascade fault produced by the teardown
+            // this cancellation triggered override the real reason.
+            if (authoritativeCancel) {
                 return;
             }
 
-            queryStatus.setStatus(status);
+            // Merge by precedence rather than arrival order: keep the highest-precedence status so
+            // the true root cause is surfaced even if a downstream CANCELLED / RPC error from a
+            // sibling fragment arrives first. On a tie, keep the first one (do not override).
+            boolean wasOk = queryStatus.ok();
+            if (wasOk || Status.precedence(status.getErrorCode()) > Status.precedence(queryStatus.getErrorCode())) {
+                queryStatus.setStatus(status);
+                // Keep the client-facing error code in sync with the highest-precedence status,
+                // rather than latching whichever code happened to arrive first.
+                if (connectContext != null) {
+                    connectContext.resetErrorCode();
+                    connectContext.setErrorCodeOnce(status.getErrorCodeString());
+                }
+            }
             if (!status.isSuppressedError()) {
                 LOG.warn(
                         "one instance report fail throw updateStatus(), need cancel. job id: {}, " +
@@ -929,7 +953,11 @@ public class DefaultCoordinator extends Coordinator {
                         jobSpec.getLoadJobId(), DebugUtil.printId(jobSpec.getQueryId()),
                         instanceId != null ? DebugUtil.printId(instanceId) : "NaN");
             }
-            cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
+            // Start teardown exactly once, on the first transition from OK to non-OK. A later
+            // precedence upgrade must not re-trigger cancellation / re-send cancel RPCs.
+            if (wasOk) {
+                cancelInternal(PPlanFragmentCancelReason.INTERNAL_ERROR);
+            }
         } finally {
             lock.unlock();
         }
@@ -1043,6 +1071,9 @@ public class DefaultCoordinator extends Coordinator {
 
         if (resultBatch.isEos()) {
             this.returnedAllResults = true;
+            // The query has completed successfully. Any status reported afterwards (a cascade
+            // CANCELLED from teardown or a late fault) must not flip the result to an error.
+            authoritativeCancel = true;
 
             // if this query is a block query do not cancel.
             long numLimitRows = executionDAG.getRootFragment().getPlanFragment().getPlanRoot().getLimit();
@@ -1081,6 +1112,9 @@ public class DefaultCoordinator extends Coordinator {
             } else {
                 queryStatus.setStatus(Status.CANCELLED);
                 queryStatus.setErrorMsg(message);
+                // This cancellation is intentional (KILL / timeout / client disconnect); its reason
+                // is authoritative and must not be overridden by cascade faults from the teardown.
+                authoritativeCancel = true;
             }
             LOG.info("cancel query {} because {}", connectContext.queryId, message);
             cancelInternal(reason);

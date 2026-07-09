@@ -46,6 +46,45 @@ public class Status {
     public static final Status OK = new Status();
     public static final Status CANCELLED = new Status(TStatusCode.CANCELLED, "Cancelled");
 
+    // Precedence tiers used to merge statuses reported by multiple fragment instances.
+    // A query failure typically yields one root-cause status plus several derived
+    // "cascade" statuses (e.g. CANCELLED / THRIFT_RPC_ERROR produced by the teardown of
+    // the fragment that actually failed). Merging by precedence keeps the root cause
+    // regardless of the nondeterministic order in which reports arrive.
+    public static final int PRECEDENCE_OK = 0;
+    public static final int PRECEDENCE_CASCADE = 1;
+    public static final int PRECEDENCE_INITIATED = 2;
+    public static final int PRECEDENCE_ROOT_CAUSE = 3;
+
+    // Returns the merge precedence of a status code. Higher wins. Any unmapped non-OK
+    // code is treated as a root cause so that unexpected real errors are never masked
+    // by a lower-precedence cascade status.
+    public static int precedence(TStatusCode code) {
+        if (code == null) {
+            return PRECEDENCE_ROOT_CAUSE;
+        }
+        switch (code) {
+            case OK:
+                return PRECEDENCE_OK;
+            // Cascade / derived statuses: usually an effect of another failure or of
+            // intentional teardown, not the reason the query died.
+            case CANCELLED:
+            case THRIFT_RPC_ERROR:
+            case SERVICE_UNAVAILABLE:
+            case SR_EAGAIN:
+                return PRECEDENCE_CASCADE;
+            // Externally/intentionally initiated terminal reasons.
+            case TIMEOUT:
+            case ABORTED:
+            case SHUTDOWN:
+                return PRECEDENCE_INITIATED;
+            default:
+                // Root-cause faults (resource limits, data/IO errors, logic errors, ...)
+                // and any other unmapped code.
+                return PRECEDENCE_ROOT_CAUSE;
+        }
+    }
+
     public TStatusCode getErrorCode() {
         return errorCode;
     }

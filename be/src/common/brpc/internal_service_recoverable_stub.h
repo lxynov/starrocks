@@ -38,12 +38,30 @@ public:
 
     int64_t connection_group() const { return _connection_group.load(); }
 
+    // Wall-clock time (butil::gettimeofday_us() units) at which the last RPC was issued through this
+    // stub, or at which the stub was created if it has never been used. Recorded by RecoverableChannel
+    // so that callers holding a stub for the lifetime of a fragment or load still count as active.
+    int64_t last_use_us() const { return _last_use_us.load(std::memory_order_relaxed); }
+    void mark_used();
+
+    // True when brpc reports the current channel's socket as unavailable. Every socket created through
+    // brpc's client-side socket map is health-check enabled, so an unavailable socket is one that brpc
+    // is probing in the background.
+    //
+    // The converse does not hold: a socket that has never connected is not failed and reports healthy.
+    // Treat a false result as "no known failure", never as evidence of reachability.
+    bool channel_failed() const;
+
 private:
     std::shared_ptr<starrocks::PInternalService_Stub> _stub;
+    // Owned by _stub, which was constructed with STUB_OWNS_CHANNEL. Retained so that the channel's
+    // health can be inspected; read and written under _mutex together with _stub.
+    brpc::Channel* _channel = nullptr;
     const butil::EndPoint _endpoint;
     std::atomic<int64_t> _connection_group = 0;
     // Distinguishes stubs that share the same endpoint.
     const int64_t _connection_group_seed = 0;
+    std::atomic<int64_t> _last_use_us;
     mutable std::shared_mutex _mutex;
     std::string _protocol;
 

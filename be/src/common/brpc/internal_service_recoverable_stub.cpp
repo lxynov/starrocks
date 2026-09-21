@@ -14,6 +14,8 @@
 
 #include "common/brpc/internal_service_recoverable_stub.h"
 
+#include <butil/time.h>
+
 #include <memory>
 
 #include "common/config_rpc_client_fwd.h"
@@ -30,6 +32,7 @@ public:
     void CallMethod(const google::protobuf::MethodDescriptor* method, google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request, google::protobuf::Message* response,
                     google::protobuf::Closure* done) override {
+        _owner->mark_used();
         google::protobuf::Closure* closure = done;
         if (done != nullptr) {
             closure = new PInternalService_RecoverableStub::RecoverableClosureType(_owner->shared_from_this(),
@@ -47,9 +50,19 @@ PInternalService_RecoverableStub::PInternalService_RecoverableStub(const butil::
         : PInternalService_Stub(new RecoverableChannel(this), google::protobuf::Service::STUB_OWNS_CHANNEL),
           _endpoint(endpoint),
           _connection_group_seed(connection_group_seed),
+          _last_use_us(butil::gettimeofday_us()),
           _protocol(std::move(protocol)) {}
 
 PInternalService_RecoverableStub::~PInternalService_RecoverableStub() = default;
+
+void PInternalService_RecoverableStub::mark_used() {
+    _last_use_us.store(butil::gettimeofday_us(), std::memory_order_relaxed);
+}
+
+bool PInternalService_RecoverableStub::channel_failed() const {
+    std::shared_lock l(_mutex);
+    return _channel != nullptr && _channel->CheckHealth() != 0;
+}
 
 Status PInternalService_RecoverableStub::reset_channel(int64_t next_connection_group) {
     if (next_connection_group == 0) {
@@ -78,6 +91,7 @@ Status PInternalService_RecoverableStub::reset_channel(int64_t next_connection_g
         LOG(WARNING) << "Fail to init channel " << _endpoint;
         return Status::InternalError("Fail to init channel");
     }
+    auto* channel_ptr = channel.get();
     auto stub =
             std::make_shared<PInternalService_Stub>(channel.release(), google::protobuf::Service::STUB_OWNS_CHANNEL);
     std::unique_lock l(_mutex);
@@ -85,6 +99,7 @@ Status PInternalService_RecoverableStub::reset_channel(int64_t next_connection_g
         // prevent the underlying _stub been reset again by the same epoch calls
         ++_connection_group;
         _stub = std::move(stub);
+        _channel = channel_ptr;
     }
     return Status::OK();
 }

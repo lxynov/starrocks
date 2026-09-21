@@ -210,6 +210,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 説明: BE の thrift サーバーポートで、FEs からのリクエストを受け取るために使用されます。
 - 導入バージョン: -
 
+### brpc_health_check_interval_s
+
+- デフォルト: 3
+- タイプ: Int
+- 単位: Seconds
+- 変更可能: いいえ
+- 説明: bRPC が失敗した接続を探索し、対向が復旧したかどうかを確認する間隔です。bRPC の `health_check_interval` フラグに対応します。この値を大きくすると、到達不能な対向が stub キャッシュから破棄されるまでにログへ出力される接続タイムアウトの警告数は減りますが、対向が復旧した際の再接続は遅くなります。bRPC はこの値を接続の作成時に読み取るため、変更は BE の再起動後に作成された接続にのみ適用されます。`1` 未満の値は `1` として扱われます。
+- 導入バージョン: v4.2.0
+
 ### brpc_max_body_size
 
 - デフォルト: 2147483648
@@ -263,6 +272,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 変更可能: Yes
 - 説明: BRPC stub キャッシュの有効期限。デフォルトは60分です。
 - 導入バージョン: -
+
+### brpc_unhealthy_stub_expire_s
+
+- デフォルト: 300
+- タイプ: Int
+- 単位: Seconds
+- 変更可能: はい
+- 説明: 接続が失敗している (つまり bRPC がバックグラウンドで探索している) bRPC stub キャッシュに適用される有効期限です。対向が IP アドレスを変更した場合 (たとえば Kubernetes Pod が置き換えられた場合)、古いアドレスが再び参照されることはないため、このパラメータがないと、その stub は `brpc_stub_expire_s` が経過するまで古いアドレスを探索し続けます。stub が早期に破棄されるのは、同じ時間だけ未使用であった場合に限られます。このパラメータに `brpc_stub_expire_s` 以上の値を設定すると早期破棄が無効になり、`brpc_stub_expire_s` のみが使用されます。
+- 導入バージョン: v4.2.0
 
 ### compress_rowbatches
 

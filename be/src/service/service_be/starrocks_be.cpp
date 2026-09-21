@@ -75,6 +75,8 @@ DECLARE_uint64(max_body_size);
 DECLARE_int64(socket_max_unwritten_bytes);
 DECLARE_bool(socket_keepalive);
 DECLARE_int32(max_connection_pool_size);
+// Defined in brpc's socket_map.cpp and not exposed through a public brpc header.
+DECLARE_int32(health_check_interval);
 
 } // namespace brpc
 
@@ -325,6 +327,11 @@ void start_be(const std::vector<StorePath>& paths, bool as_cn) {
     // Client-side flag, only consulted when brpc_connection_type is "pooled". brpc re-reads it on every
     // pooled get/return, so it can also be tuned at runtime through brpc's builtin /flags page.
     brpc::FLAGS_max_connection_pool_size = config::brpc_max_connection_pool_size;
+
+    // Client-side flag read when a socket is created, so it only affects sockets created from here on.
+    // brpc requires a positive interval for the correctness of SocketMapRemove, and its own gflag
+    // validator rejects anything else, so clamp rather than pass a bad value through.
+    brpc::FLAGS_health_check_interval = std::max<int32_t>(config::brpc_health_check_interval_s, 1);
 
     auto brpc_server = std::make_unique<brpc::Server>();
 

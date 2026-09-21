@@ -32,8 +32,10 @@ public:
     void SetUp() override {
         _saved_brpc_max_connections_per_server = config::brpc_max_connections_per_server;
         _saved_brpc_stub_expire_s = config::brpc_stub_expire_s;
+        _saved_brpc_unhealthy_stub_expire_s = config::brpc_unhealthy_stub_expire_s;
         config::brpc_max_connections_per_server = 1;
         config::brpc_stub_expire_s = 3600;
+        config::brpc_unhealthy_stub_expire_s = 300;
         _timer = std::make_unique<BthreadTimer>();
         ASSERT_OK(_timer->start());
     }
@@ -41,13 +43,68 @@ public:
         _timer.reset();
         config::brpc_max_connections_per_server = _saved_brpc_max_connections_per_server;
         config::brpc_stub_expire_s = _saved_brpc_stub_expire_s;
+        config::brpc_unhealthy_stub_expire_s = _saved_brpc_unhealthy_stub_expire_s;
     }
 
 private:
     std::unique_ptr<BthreadTimer> _timer;
     int32_t _saved_brpc_max_connections_per_server = 0;
     int32_t _saved_brpc_stub_expire_s = 0;
+    int32_t _saved_brpc_unhealthy_stub_expire_s = 0;
 };
+
+// The retirement policy is exercised directly: a real failing channel needs a TCP blackhole, which
+// is out of reach for a unit test, but the decision it feeds is pure and fully testable.
+TEST_F(BrpcStubCacheTest, decide_endpoint_cleanup_policy) {
+    using Action = EndpointCleanupDecision::Action;
+    constexpr int64_t kSecondUs = 1000 * 1000;
+    constexpr int64_t kLastUse = 1000000 * kSecondUs;
+    config::brpc_stub_expire_s = 3600;
+    config::brpc_unhealthy_stub_expire_s = 300;
+
+    // Healthy and inside both windows: the next checkpoint is the unhealthy deadline, not the idle
+    // deadline, because a healthy endpoint can start failing at any time while it sits idle.
+    auto decision = decide_endpoint_cleanup(kLastUse, kLastUse + 10 * kSecondUs, false, false);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+    EXPECT_EQ(kLastUse + 300 * kSecondUs, decision.next_fire_us);
+
+    // Failing but not yet idle long enough.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 299 * kSecondUs, true, false);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+
+    // Failing past the unhealthy window: retired early.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 300 * kSecondUs, true, false);
+    EXPECT_EQ(Action::kRetire, decision.action);
+    EXPECT_TRUE(decision.retired_unhealthy);
+
+    // Healthy past the unhealthy window: health has to be polled until the idle deadline.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 400 * kSecondUs, false, false);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+    EXPECT_EQ(kLastUse + 430 * kSecondUs, decision.next_fire_us);
+
+    // Polling never overshoots the idle deadline.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 3590 * kSecondUs, false, false);
+    EXPECT_EQ(kLastUse + 3600 * kSecondUs, decision.next_fire_us);
+
+    // Idle past the ordinary TTL: retired, but not attributed to the unhealthy rule.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 3600 * kSecondUs, false, false);
+    EXPECT_EQ(Action::kRetire, decision.action);
+    EXPECT_FALSE(decision.retired_unhealthy);
+
+    // An external owner defers both retirement paths.
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 300 * kSecondUs, true, true);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+    EXPECT_TRUE(decision.deferred_by_owner);
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 3600 * kSecondUs, false, true);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+    EXPECT_TRUE(decision.deferred_by_owner);
+
+    // An unhealthy window at or above the idle TTL disables early retirement.
+    config::brpc_unhealthy_stub_expire_s = 3600;
+    decision = decide_endpoint_cleanup(kLastUse, kLastUse + 300 * kSecondUs, true, false);
+    EXPECT_EQ(Action::kReschedule, decision.action);
+    EXPECT_EQ(kLastUse + 3600 * kSecondUs, decision.next_fire_us);
+}
 
 TEST_F(BrpcStubCacheTest, normal) {
     BrpcStubCache cache(_timer.get());
@@ -130,20 +187,27 @@ TEST_F(BrpcStubCacheTest, test_http_stub) {
     ASSERT_EQ(nullptr, *stub4);
 }
 
+// Retirement must release the stub, and with it the brpc channel, not merely drop the map entry:
+// releasing the last channel reference is what makes brpc stop health-checking the endpoint.
 TEST_F(BrpcStubCacheTest, test_cleanup) {
     config::brpc_stub_expire_s = 1;
     BrpcStubCache cache(_timer.get());
     TNetworkAddress address;
     address.hostname = "127.0.0.1";
     address.port = 123;
-    auto stub1 = cache.get_stub(address);
-    ASSERT_NE(nullptr, stub1);
-    auto stub2 = cache.get_stub(address);
-    ASSERT_EQ(stub2, stub1);
+    std::weak_ptr<PInternalService_RecoverableStub> retired;
+    {
+        auto stub1 = cache.get_stub(address);
+        ASSERT_NE(nullptr, stub1);
+        auto stub2 = cache.get_stub(address);
+        ASSERT_EQ(stub2, stub1);
+        retired = stub1;
+    }
 
     sleep(2);
+    ASSERT_TRUE(retired.expired()) << "idle endpoint must be retired and its channel released";
     auto stub3 = cache.get_stub(address);
-    ASSERT_NE(stub3, stub1);
+    ASSERT_NE(nullptr, stub3);
 }
 
 #ifndef __APPLE__
@@ -152,16 +216,22 @@ TEST_F(BrpcStubCacheTest, test_lake_cleanup) {
     LakeServiceBrpcStubCache cache(_timer.get());
     std::string hostname = "127.0.0.1";
     int32_t port = 123;
-    auto stub1 = cache.get_stub(hostname, port);
-    ASSERT_TRUE(stub1.ok());
-    ASSERT_NE(nullptr, *stub1);
-    auto stub2 = cache.get_stub(hostname, port);
-    ASSERT_TRUE(stub1.ok());
-    ASSERT_EQ(*stub2, *stub1);
+    std::weak_ptr<LakeService_RecoverableStub> retired;
+    {
+        auto stub1 = cache.get_stub(hostname, port);
+        ASSERT_TRUE(stub1.ok());
+        ASSERT_NE(nullptr, *stub1);
+        auto stub2 = cache.get_stub(hostname, port);
+        ASSERT_TRUE(stub2.ok());
+        ASSERT_EQ(*stub2, *stub1);
+        retired = *stub1;
+    }
 
     sleep(2);
+    ASSERT_TRUE(retired.expired()) << "idle lake endpoint must be retired and its channel released";
     auto stub3 = cache.get_stub(hostname, port);
-    ASSERT_NE(*stub3, *stub1);
+    ASSERT_TRUE(stub3.ok());
+    ASSERT_NE(nullptr, *stub3);
 }
 #endif
 
@@ -171,14 +241,121 @@ TEST_F(BrpcStubCacheTest, test_http_cleanup) {
     TNetworkAddress address;
     address.hostname = "127.0.0.1";
     address.port = 123;
-    auto stub1 = cache.get_http_stub(address);
-    ASSERT_NE(nullptr, *stub1);
-    auto stub2 = cache.get_http_stub(address);
-    ASSERT_EQ(*stub2, *stub1);
+    std::weak_ptr<PInternalService_RecoverableStub> retired;
+    {
+        auto stub1 = cache.get_http_stub(address);
+        ASSERT_NE(nullptr, *stub1);
+        auto stub2 = cache.get_http_stub(address);
+        ASSERT_EQ(*stub2, *stub1);
+        retired = *stub1;
+    }
 
     sleep(2);
+    ASSERT_TRUE(retired.expired()) << "idle http endpoint must be retired and its channel released";
     auto stub3 = cache.get_http_stub(address);
-    ASSERT_NE(*stub3, *stub1);
+    ASSERT_NE(nullptr, *stub3);
+}
+
+// A caller holding a stub must defer retirement. Detaching the pool while its channel is still
+// referenced would leave the channel probing and make the next lookup build a second pool for the
+// same endpoint.
+TEST_F(BrpcStubCacheTest, test_cleanup_deferred_while_stub_is_held) {
+    config::brpc_stub_expire_s = 1;
+    BrpcStubCache cache(_timer.get());
+    TNetworkAddress address;
+    address.hostname = "127.0.0.1";
+    address.port = 123;
+    auto held = cache.get_stub(address);
+    ASSERT_NE(nullptr, held);
+    std::weak_ptr<PInternalService_RecoverableStub> observed = held;
+
+    sleep(2);
+    ASSERT_FALSE(observed.expired()) << "a held stub must not be destroyed";
+    auto same = cache.get_stub(address);
+    ASSERT_EQ(held, same) << "the deferred pool must stay in the map instead of being rebuilt";
+
+    // Once the last caller releases it, a later firing retires the pool without a new lookup.
+    held.reset();
+    same.reset();
+    sleep(3);
+    ASSERT_TRUE(observed.expired()) << "retirement must resume after the caller releases the stub";
+}
+
+#ifndef __APPLE__
+TEST_F(BrpcStubCacheTest, test_lake_cleanup_deferred_while_stub_is_held) {
+    config::brpc_stub_expire_s = 1;
+    LakeServiceBrpcStubCache cache(_timer.get());
+    std::shared_ptr<LakeService_RecoverableStub> held;
+    {
+        auto acquired = cache.get_stub("127.0.0.1", 123);
+        ASSERT_TRUE(acquired.ok());
+        held = *acquired;
+    }
+    std::weak_ptr<LakeService_RecoverableStub> observed = held;
+
+    sleep(2);
+    ASSERT_FALSE(observed.expired());
+    {
+        auto same = cache.get_stub("127.0.0.1", 123);
+        ASSERT_TRUE(same.ok());
+        ASSERT_EQ(held, *same);
+    }
+
+    held.reset();
+    sleep(3);
+    ASSERT_TRUE(observed.expired());
+}
+#endif
+
+TEST_F(BrpcStubCacheTest, test_http_cleanup_deferred_while_stub_is_held) {
+    config::brpc_stub_expire_s = 1;
+    HttpBrpcStubCache cache(_timer.get());
+    TNetworkAddress address;
+    address.hostname = "127.0.0.1";
+    address.port = 123;
+    std::shared_ptr<PInternalService_RecoverableStub> held;
+    {
+        auto acquired = cache.get_http_stub(address);
+        ASSERT_TRUE(acquired.ok());
+        held = *acquired;
+    }
+    std::weak_ptr<PInternalService_RecoverableStub> observed = held;
+
+    sleep(2);
+    ASSERT_FALSE(observed.expired());
+    {
+        auto same = cache.get_http_stub(address);
+        ASSERT_TRUE(same.ok());
+        ASSERT_EQ(held, *same);
+    }
+
+    held.reset();
+    sleep(3);
+    ASSERT_TRUE(observed.expired());
+}
+
+// The short unhealthy window must only apply to endpoints brpc has marked failed. This endpoint has
+// never connected, so brpc reports its socket healthy and only the ordinary idle TTL may retire it.
+TEST_F(BrpcStubCacheTest, test_unhealthy_window_does_not_shorten_healthy_ttl) {
+    config::brpc_stub_expire_s = 5;
+    config::brpc_unhealthy_stub_expire_s = 1;
+    BrpcStubCache cache(_timer.get());
+    TNetworkAddress address;
+    address.hostname = "127.0.0.1";
+    address.port = 123;
+    std::weak_ptr<PInternalService_RecoverableStub> observed;
+    {
+        auto stub = cache.get_stub(address);
+        ASSERT_NE(nullptr, stub);
+        ASSERT_FALSE(stub->channel_failed()) << "a socket that never connected must not look failed";
+        observed = stub;
+    }
+
+    sleep(3);
+    ASSERT_FALSE(observed.expired()) << "a healthy endpoint must outlive the unhealthy window";
+
+    sleep(4);
+    ASSERT_TRUE(observed.expired()) << "the ordinary idle TTL must still retire it";
 }
 
 // Regression test: destroying BrpcStubCache while a cleanup task is scheduled

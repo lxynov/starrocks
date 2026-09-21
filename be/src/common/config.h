@@ -68,6 +68,17 @@ CONF_Int32(brpc_max_connections_per_server, "1");
 // BRPC stub cache expire configurations
 // The expire time of BRPC stub cache, default 60 minutes.
 CONF_mInt32(brpc_stub_expire_s, "3600"); // 60 minutes
+// Shorter expire time applied to a cached endpoint whose brpc channels are in the failed state, which
+// means brpc is running background health checks against it. A peer that changed IP (for example a
+// replaced Kubernetes pod) is never looked up again, so its entry would otherwise keep probing the old
+// address for brpc_stub_expire_s. Values >= brpc_stub_expire_s disable the rule.
+CONF_mInt32(brpc_unhealthy_stub_expire_s, "300"); // 5 minutes
+// Maps to brpc's -health_check_interval: seconds between consecutive connect probes of a failed
+// connection. Raising it reduces the rate of connection-timeout warnings produced while an unreachable
+// endpoint is being retired, at the cost of slower recovery for an endpoint that comes back. brpc reads
+// the flag when a socket is created, so this only affects sockets created after startup. Values below 1
+// are clamped: brpc requires a positive interval for the correctness of SocketMapRemove.
+CONF_Int32(brpc_health_check_interval_s, "3");
 
 // Whether to resolve backend hostnames to IP addresses in generated error URLs.
 // - true: StarRocks will attempt to resolve hostnames to IPs.

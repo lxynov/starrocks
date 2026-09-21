@@ -38,6 +38,14 @@ public:
 
     int64_t connection_group() const { return _connection_group.load(); }
 
+    // True when brpc reports the current channel's socket as unavailable. Every socket created through
+    // brpc's client-side socket map is health-check enabled, so an unavailable socket is one that brpc
+    // is probing in the background.
+    //
+    // The converse does not hold: a socket that has never connected is not failed and reports healthy.
+    // Treat a false result as "no known failure", never as evidence of reachability.
+    bool channel_failed() const;
+
 private:
     std::shared_ptr<starrocks::PInternalService_Stub> _stub;
     const butil::EndPoint _endpoint;

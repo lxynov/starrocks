@@ -36,6 +36,11 @@ public:
 
     int64_t connection_group() const { return _connection_group.load(); }
 
+    // True when brpc reports the current channel's socket as unavailable, which for a socket-map
+    // socket means background health checking is running against it. A socket that has never
+    // connected reports healthy, so a false result is not evidence of reachability.
+    bool channel_failed() const;
+
     // implements LakeService ------------------------------------------
 
     void publish_version(::google::protobuf::RpcController* controller,

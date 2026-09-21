@@ -258,6 +258,15 @@ This topic introduces the following types of BE configurations:
   The choice affects per-socket buffering behavior and can influence `Socket.Write` failures (EOVERCROWDED) when unwritten bytes exceed socket limits.
 - Introduced in: v3.2.5
 
+### brpc_health_check_interval_s
+
+- Default: 3
+- Type: Int
+- Unit: Seconds
+- Is mutable: No
+- Description: The interval at which bRPC probes a failed connection to find out whether the peer is reachable again. Maps to bRPC's `health_check_interval` flag. Increasing this value reduces the number of connection timeout warnings written to the log while an unreachable peer is being retired from the stub cache, at the cost of a slower reconnection after the peer recovers. bRPC reads this value when a connection is created, so a change only applies to connections created after the BE restarts. A value below `1` is treated as `1`.
+- Introduced in: v4.2.0
+
 ### brpc_max_body_size
 
 - Default: 2147483648
@@ -320,6 +329,15 @@ This topic introduces the following types of BE configurations:
 - Is mutable: Yes
 - Description: The expire time of bRPC stub cache. The default value is 60 minutes.
 - Introduced in: -
+
+### brpc_unhealthy_stub_expire_s
+
+- Default: 300
+- Type: Int
+- Unit: Seconds
+- Is mutable: Yes
+- Description: The expire time applied to a cached bRPC stub whose connections have failed, which means bRPC is probing them in the background. When a peer changes its IP address, for example after its Kubernetes pod is replaced, the old address is never looked up again, so without this parameter its cached stub keeps probing the old address until `brpc_stub_expire_s` elapses. A stub is only expired early if it has also been unused for this long. Set this parameter to a value greater than or equal to `brpc_stub_expire_s` to disable early expiration and rely on `brpc_stub_expire_s` alone.
+- Introduced in: v4.2.0
 
 ### compress_rowbatches
 

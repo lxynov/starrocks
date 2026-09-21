@@ -15,6 +15,7 @@
 #include "common/brpc/internal_service_recoverable_stub.h"
 
 #include <memory>
+#include <utility>
 
 #include "common/config_rpc_client_fwd.h"
 
@@ -51,6 +52,17 @@ PInternalService_RecoverableStub::PInternalService_RecoverableStub(const butil::
 
 PInternalService_RecoverableStub::~PInternalService_RecoverableStub() = default;
 
+bool PInternalService_RecoverableStub::channel_failed() const {
+    // Holding the stub keeps the channel it owns alive, so CheckHealth() runs with _mutex released.
+    auto current = stub();
+    if (current == nullptr) {
+        return false;
+    }
+    // brpc::Channel re-declares CheckHealth() as protected; it is only reachable through the
+    // ChannelBase interface that channel_base.h publishes for exactly this purpose.
+    return static_cast<brpc::ChannelBase*>(current->channel())->CheckHealth() != 0;
+}
+
 Status PInternalService_RecoverableStub::reset_channel(int64_t next_connection_group) {
     if (next_connection_group == 0) {
         next_connection_group = _connection_group.load() + 1;
@@ -80,11 +92,16 @@ Status PInternalService_RecoverableStub::reset_channel(int64_t next_connection_g
     }
     auto stub =
             std::make_shared<PInternalService_Stub>(channel.release(), google::protobuf::Service::STUB_OWNS_CHANNEL);
-    std::unique_lock l(_mutex);
-    if (next_connection_group == _connection_group.load() + 1) {
-        // prevent the underlying _stub been reset again by the same epoch calls
-        ++_connection_group;
-        _stub = std::move(stub);
+    // Declared before the lock so that ~brpc::Channel, which takes brpc's global socket-map mutex
+    // and can close sockets, runs after _mutex is released rather than blocking readers behind it.
+    std::shared_ptr<PInternalService_Stub> previous;
+    {
+        std::unique_lock l(_mutex);
+        if (next_connection_group == _connection_group.load() + 1) {
+            // prevent the underlying _stub been reset again by the same epoch calls
+            ++_connection_group;
+            previous = std::exchange(_stub, std::move(stub));
+        }
     }
     return Status::OK();
 }

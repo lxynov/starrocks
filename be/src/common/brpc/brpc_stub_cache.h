@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -58,15 +59,25 @@ class MetricRegistry;
 
 constexpr int TIMER_TASK_RUNNING = 1;
 
+int64_t brpc_stub_idle_ttl_us();
+int64_t brpc_stub_unhealthy_ttl_us();
+
+// When a freshly cached endpoint should first be evaluated.
+inline int64_t first_cleanup_fire_us(int64_t now_us) {
+    return now_us + brpc_stub_unhealthy_ttl_us();
+}
+
 template <typename StubCacheT>
 class EndpointCleanupTask : public BthreadTimerTask {
 public:
-    // ttl_seconds is the cache-wide expire window (config::brpc_stub_expire_s).
-    EndpointCleanupTask(StubCacheT* cache, const butil::EndPoint& endpoint, int64_t ttl_seconds)
-            : _cache(cache), _endpoint(endpoint), _ttl_seconds(ttl_seconds) {}
-    // The actual cleanup/renewal decision must run while the cache's _lock is held so
-    // that _stopping and _deadline are observed atomically with the cache state.
+    EndpointCleanupTask(StubCacheT* cache, const butil::EndPoint& endpoint) : _cache(cache), _endpoint(endpoint) {}
+
+    // The retirement decision must run while the cache's _lock is held so that _stopping, the entry's
+    // last lookup and the ownership of its stubs are all observed atomically with the cache state.
     void Run() override {
+        // Declared before the lock guard, and therefore destroyed after it, so that ~brpc::Channel
+        // runs outside the spinlock: it takes brpc's global socket-map mutex and can close sockets.
+        typename StubCacheT::DetachedEntry detached;
         std::lock_guard<SpinLock> l(_cache->_lock);
         if (_cache->_stopping) {
             return;
@@ -78,41 +89,59 @@ public:
         if (!_cache->is_cleanup_task_owner_locked(_endpoint, this)) {
             return;
         }
-        int64_t now_us = butil::gettimeofday_us();
-        if (now_us >= _deadline) {
-            LOG(INFO) << "cleanup brpc stub, endpoint:" << _endpoint << ", idle for " << (now_us - _deadline) / 1000
-                      << "ms past deadline";
-            _cache->_stub_map.erase(_endpoint);
-            return;
+        const int64_t now_us = butil::gettimeofday_us();
+        const int64_t idle_ttl_us = brpc_stub_idle_ttl_us();
+        const int64_t unhealthy_ttl_us = brpc_stub_unhealthy_ttl_us();
+        const int64_t idle_us = now_us - _last_lookup_us;
+        const bool idle_expired = idle_us >= idle_ttl_us;
+        // endpoint_failing_locked() locks every stub of the entry, so ask only once the short window
+        // has elapsed and the answer can still change the outcome. Failure is only ever a reason to
+        // retire early, never a reason to keep an endpoint alive: a socket that has never connected
+        // also reports healthy.
+        const bool unhealthy_expired =
+                !idle_expired && idle_us >= unhealthy_ttl_us && _cache->endpoint_failing_locked(_endpoint);
+
+        // Poll at most one short window ahead, since a healthy endpoint can start failing at any
+        // point while it sits idle, but never past the idle deadline.
+        int64_t next_fire_us = std::min(now_us + unhealthy_ttl_us, _last_lookup_us + idle_ttl_us);
+        if (idle_expired || unhealthy_expired) {
+            if (!_cache->endpoint_owned_locked(_endpoint)) {
+                LOG(INFO) << "cleanup brpc stub, endpoint:" << _endpoint << ", idle for " << idle_us / 1000 << "ms"
+                          << (unhealthy_expired ? ", channels failing" : "");
+                _cache->record_retirement_locked(unhealthy_expired);
+                detached = _cache->detach_locked(_endpoint);
+                return;
+            }
+            // Detaching now would drop the map entry without releasing the channels, and the next
+            // lookup would build a second set of channels to the same endpoint. Wait for the holder.
+            // The idle deadline is already behind us, so retry a short window from now instead.
+            _cache->record_deferral_locked();
+            next_fire_us = now_us + unhealthy_ttl_us;
         }
-        auto new_task = std::make_shared<EndpointCleanupTask<StubCacheT>>(_cache, _endpoint, _ttl_seconds);
-        new_task->_deadline = _deadline;
+
+        auto new_task = std::make_shared<EndpointCleanupTask<StubCacheT>>(_cache, _endpoint);
+        new_task->_last_lookup_us = _last_lookup_us;
         if (!_cache->replace_cleanup_task_locked(_endpoint, new_task)) {
             return;
         }
-        timespec tm = butil::microseconds_to_timespec(_deadline);
+        timespec tm = butil::microseconds_to_timespec(next_fire_us);
         auto status = _cache->_timer->schedule(new_task.get(), tm);
         if (!status.ok()) {
             LOG(WARNING) << "Failed to reschedule brpc cleanup task: " << _endpoint;
             // Drop the entry; the next get_*_stub() will recreate it with a fresh task.
-            _cache->_stub_map.erase(_endpoint);
+            detached = _cache->detach_locked(_endpoint);
         }
     }
 
-    // Reset the absolute deadline (in butil::gettimeofday_us() units) used by the next
-    // Run() invocation to decide between evict and reschedule. Caller must hold the
-    // cache lock.
-    void renew_deadline_locked(int64_t new_deadline) { _deadline = new_deadline; }
-    int64_t deadline_locked() const { return _deadline; }
+    // Record that the endpoint was looked up at `now_us`. Caller must hold the cache lock.
+    void renew_last_lookup_locked(int64_t now_us) { _last_lookup_us = now_us; }
 
 private:
     StubCacheT* _cache;
     butil::EndPoint _endpoint;
-    // Absolute deadline (in butil::gettimeofday_us() units) used to decide whether a
-    // firing task should evict the stub or simply reschedule itself. Read/written only
-    // under the cache's _lock, so it does not need to be atomic.
-    int64_t _deadline{0};
-    int64_t _ttl_seconds{0};
+    // Time of the last lookup, in butil::gettimeofday_us() units. Read and written only under the
+    // cache's _lock, so it does not need to be atomic.
+    int64_t _last_lookup_us{0};
 };
 
 class BrpcStubCache {
@@ -148,10 +177,30 @@ private:
         ~StubPool();
         std::shared_ptr<PInternalService_RecoverableStub> get_or_create(const butil::EndPoint& endpoint);
 
+        // Both predicates below are called by the cleanup task under BrpcStubCache::_lock.
+
+        // Whether any channel in the pool is in brpc's failed state.
+        bool any_channel_failed() const;
+        // Whether any stub is referenced by something other than this pool. `_stubs` holds exactly one
+        // reference per stub, and get_or_create() is the only way to obtain another, so while the cache
+        // lock is held a count of one proves that no caller can be using the stub and that none can
+        // start before the pool is detached. An in-flight RPC also counts here, because
+        // RecoverableClosure holds the stub through shared_from_this().
+        bool any_stub_externally_owned() const;
+
         std::vector<std::shared_ptr<PInternalService_RecoverableStub>> _stubs;
         int64_t _idx{-1};
         std::shared_ptr<EndpointCleanupTask<BrpcStubCache>> _cleanup_task;
     };
+
+    // Entry ownership handed back to the cleanup task so that it can destroy the channels after
+    // releasing the cache lock.
+    using DetachedEntry = std::shared_ptr<StubPool>;
+    DetachedEntry detach_locked(const butil::EndPoint& endpoint);
+    bool endpoint_failing_locked(const butil::EndPoint& endpoint) const;
+    bool endpoint_owned_locked(const butil::EndPoint& endpoint) const;
+    void record_retirement_locked(bool unhealthy);
+    void record_deferral_locked();
 
     SpinLock _lock;
     butil::FlatMap<butil::EndPoint, std::shared_ptr<StubPool>> _stub_map;
@@ -196,6 +245,14 @@ private:
         std::shared_ptr<EndpointCleanupTask<HttpBrpcStubCache>> cleanup_task;
     };
 
+    using DetachedEntry = StubEntry;
+    DetachedEntry detach_locked(const butil::EndPoint& endpoint);
+    bool endpoint_failing_locked(const butil::EndPoint& endpoint) const;
+    bool endpoint_owned_locked(const butil::EndPoint& endpoint) const;
+    // The retirement counters are only wired up for BrpcStubCache, which carries the metric registry.
+    void record_retirement_locked(bool) {}
+    void record_deferral_locked() {}
+
     SpinLock _lock;
     butil::FlatMap<butil::EndPoint, StubEntry> _stub_map;
     BthreadTimer* _timer;
@@ -238,6 +295,14 @@ private:
         std::shared_ptr<LakeService_RecoverableStub> stub;
         std::shared_ptr<EndpointCleanupTask<LakeServiceBrpcStubCache>> cleanup_task;
     };
+
+    using DetachedEntry = StubEntry;
+    DetachedEntry detach_locked(const butil::EndPoint& endpoint);
+    bool endpoint_failing_locked(const butil::EndPoint& endpoint) const;
+    bool endpoint_owned_locked(const butil::EndPoint& endpoint) const;
+    // The retirement counters are only wired up for BrpcStubCache, which carries the metric registry.
+    void record_retirement_locked(bool) {}
+    void record_deferral_locked() {}
 
     SpinLock _lock;
     butil::FlatMap<butil::EndPoint, StubEntry> _stub_map;

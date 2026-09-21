@@ -26,6 +26,17 @@ LakeService_RecoverableStub::LakeService_RecoverableStub(const butil::EndPoint& 
 
 LakeService_RecoverableStub::~LakeService_RecoverableStub() = default;
 
+bool LakeService_RecoverableStub::channel_failed() const {
+    // Holding the stub keeps the channel it owns alive, so CheckHealth() runs with _mutex released.
+    auto current = stub();
+    if (current == nullptr) {
+        return false;
+    }
+    // brpc::Channel re-declares CheckHealth() as protected; it is only reachable through the
+    // ChannelBase interface that channel_base.h publishes for exactly this purpose.
+    return static_cast<brpc::ChannelBase*>(current->channel())->CheckHealth() != 0;
+}
+
 Status LakeService_RecoverableStub::reset_channel(int64_t next_connection_group) {
     if (next_connection_group == 0) {
         next_connection_group = _connection_group.load() + 1;
@@ -53,12 +64,17 @@ Status LakeService_RecoverableStub::reset_channel(int64_t next_connection_group)
         LOG(WARNING) << "Fail to init channel " << _endpoint;
         return Status::InternalError("Fail to init channel");
     }
-    auto ptr = std::make_unique<LakeService_Stub>(channel.release(), google::protobuf::Service::STUB_OWNS_CHANNEL);
-    std::unique_lock l(_mutex);
-    if (next_connection_group == _connection_group.load() + 1) {
-        // prevent the underlying _stub been reset again by the same epoch calls
-        ++_connection_group;
-        _stub.reset(ptr.release());
+    auto ptr = std::make_shared<LakeService_Stub>(channel.release(), google::protobuf::Service::STUB_OWNS_CHANNEL);
+    // Declared before the lock so that ~brpc::Channel, which takes brpc's global socket-map mutex
+    // and can close sockets, runs after _mutex is released rather than blocking readers behind it.
+    std::shared_ptr<LakeService_Stub> previous;
+    {
+        std::unique_lock l(_mutex);
+        if (next_connection_group == _connection_group.load() + 1) {
+            // prevent the underlying _stub been reset again by the same epoch calls
+            ++_connection_group;
+            previous = std::exchange(_stub, std::move(ptr));
+        }
     }
     return Status::OK();
 }

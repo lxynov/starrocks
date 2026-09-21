@@ -243,6 +243,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 描述：bRPC 渠道的连接模式。`single`（默认）每个渠道复用一条长连接；`pooled` 为每端点维护连接池以提升并发（增加 FD 占用）；`short` 为短连接，每次 RPC 建连以减少持久连接但会提高延迟和建连开销。
 - 引入版本：v3.2.5
 
+### brpc_health_check_interval_s
+
+- 默认值：3
+- 类型：Int
+- 单位：Seconds
+- 是否动态：否
+- 描述：bRPC 探测失败连接、判断对端是否恢复的时间间隔，对应 bRPC 的 `health_check_interval` 参数。调大该值可以减少对端不可达期间写入日志的连接超时告警数量，但对端恢复后重连也会变慢。bRPC 在创建连接时读取该值，因此修改后仅对 BE 重启之后新建的连接生效。小于 `1` 的值按 `1` 处理。
+- 引入版本：v4.2.0
+
 ### brpc_max_body_size
 
 - 默认值：2147483648
@@ -305,6 +314,15 @@ SELECT * FROM information_schema.be_configs [WHERE NAME LIKE "%<name_pattern>%"]
 - 是否动态：是
 - 描述：BRPC stub 缓存的过期时间，默认 60 minutes。
 - 引入版本：-
+
+### brpc_unhealthy_stub_expire_s
+
+- 默认值：300
+- 类型：Int
+- 单位：Seconds
+- 是否动态：是
+- 描述：连接已失败（即 bRPC 正在后台探测）的 bRPC stub 缓存的过期时间。当对端更换 IP 地址（例如 Kubernetes Pod 被重建）后，旧地址不会再被访问，如果没有该参数，其缓存的 stub 会持续探测旧地址直到 `brpc_stub_expire_s` 到期。只有同时满足闲置时间超过该值时，stub 才会被提前淘汰。将该参数设置为大于或等于 `brpc_stub_expire_s` 的值可关闭提前淘汰，仅使用 `brpc_stub_expire_s`。
+- 引入版本：v4.2.0
 
 ### compress_rowbatches
 

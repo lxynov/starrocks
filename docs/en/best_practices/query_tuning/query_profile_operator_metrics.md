@@ -317,6 +317,7 @@ Typical scenarios that can make Exchange Operator the bottleneck of a query:
 | PendingFinishTime | Elapsed time since the sink buffer began finishing, measured when the profile is updated; zero before finishing begins. A child of `WaitTime`, separate from the Pipeline-level counter of the same name. |
 | OverallTime | Total time for the entire transmission process, i.e., from sending the first data packet to confirming the correct reception of the last data packet. |
 | RpcAvgTime | Average time for RPC. |
+| RpcMaxTime | Maximum time for a single RPC. In the merged query profile, `__MAX_OF_RpcMaxTime` is the maximum across all instances. |
 | RpcCount | Total number of RPCs. |
 
 #### Exchange Source Operator

@@ -15,6 +15,7 @@
 #include "exec/pipeline/exchange/exchange_sink_operator.h"
 
 #include <brpc/server.h>
+#include <bthread/bthread.h>
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -28,6 +29,7 @@
 #include "common/brpc/internal_service_recoverable_stub.h"
 #include "common/config_exec_flow_fwd.h"
 #include "common/config_network_fwd.h"
+#include "common/runtime_profile.h"
 #include "common/system/backend_options.h"
 #include "exec/exec_env.h"
 #include "exec/pipeline/exchange/sink_buffer.h"
@@ -299,6 +301,73 @@ TEST_F(SinkBufferCancelTest, cancel_with_no_inflight_rpc_is_safe) {
 
     buffer->cancel_one_sinker(_runtime_state.get());
     EXPECT_TRUE(buffer->is_finished());
+}
+
+// A brpc PInternalService that answers transmit_chunk immediately, except for the request whose
+// sequence is `slow_sequence`, which it holds for `slow_delay_us` before answering.
+class DelayedInternalService : public starrocks::PInternalService {
+public:
+    void transmit_chunk(google::protobuf::RpcController* /*controller*/, const starrocks::PTransmitChunkParams* request,
+                        starrocks::PTransmitChunkResult* response, google::protobuf::Closure* done) override {
+        if (request->sequence() == slow_sequence) {
+            bthread_usleep(slow_delay_us);
+        }
+        response->mutable_status()->set_status_code(0);
+        done->Run();
+    }
+
+    int64_t slow_sequence = -1;
+    int64_t slow_delay_us = 0;
+};
+
+using SinkBufferProfileTest = SinkBufferCancelTest;
+
+// RpcAvgTime dilutes one slow RPC across the fast ones; RpcMaxTime must still report it.
+TEST_F(SinkBufferProfileTest, rpc_max_time_reports_slowest_rpc) {
+    brpc::Server server;
+    DelayedInternalService service;
+    service.slow_sequence = 1;
+    service.slow_delay_us = 500 * 1000;
+    brpc::ServerOptions options;
+    options.num_threads = 2;
+    ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+    ASSERT_EQ(server.Start(0, &options), 0);
+    const int port = server.listen_address().port;
+    DeferOp stop_server([&] {
+        server.Stop(0);
+        server.Join();
+    });
+
+    auto dest_id = make_dest_id(/*lo*/ 555555555);
+    auto buffer = make_remote_sink_buffer(port, dest_id);
+    buffer->incr_sinker(_runtime_state.get());
+
+    auto stub = std::make_shared<PInternalService_RecoverableStub>(server.listen_address(), "");
+    ASSERT_OK(stub->reset_channel());
+
+    constexpr int num_data_requests = 4;
+    for (int i = 0; i < num_data_requests; ++i) {
+        auto request = make_request(dest_id, port, stub);
+        ASSERT_OK(buffer->add_request(request));
+    }
+    auto eos_request = make_request(dest_id, port, stub);
+    eos_request.params->set_eos(true);
+    ASSERT_OK(buffer->add_request(eos_request));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!buffer->is_finished() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(buffer->is_finished());
+
+    RuntimeProfile profile("sink_buffer");
+    buffer->update_profile(&profile);
+    const int64_t rpc_count = profile.get_counter("RpcCount")->value();
+    const int64_t rpc_avg_time = profile.get_counter("RpcAvgTime")->value();
+    const int64_t rpc_max_time = profile.get_counter("RpcMaxTime")->value();
+    EXPECT_EQ(num_data_requests + 1, rpc_count);
+    EXPECT_GE(rpc_max_time, service.slow_delay_us * 1000);
+    EXPECT_LT(rpc_avg_time, rpc_max_time);
 }
 
 } // namespace starrocks::pipeline

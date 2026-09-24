@@ -141,6 +141,7 @@ public final class ProfileKeyDictionary {
     public static final String NETWORK_BANDWIDTH = "NetworkBandwidth";
     public static final String RPC_COUNT = "RpcCount";
     public static final String RPC_AVG_TIME = "RpcAvgTime";
+    public static final String RPC_MAX_TIME = "RpcMaxTime";
     public static final String REQUEST_SENT = "RequestSent";
     public static final String REQUEST_RECEIVED = "RequestReceived";
     public static final String REQUEST_UNSENT = "RequestUnsent";
@@ -347,6 +348,7 @@ public final class ProfileKeyDictionary {
             NETWORK_BANDWIDTH,
             RPC_COUNT,
             RPC_AVG_TIME,
+            RPC_MAX_TIME,
             REQUEST_SENT,
             REQUEST_RECEIVED,
             REQUEST_UNSENT,

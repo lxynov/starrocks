@@ -305,6 +305,7 @@ OLAP_SCANオペレーターに似ていますが、Iceberg/Hive/Hudi/Deltaなど
 | PendingFinishTime | シンクバッファが終了処理を開始してからプロファイル更新時点までの経過時間。終了処理の開始前はゼロ。`WaitTime` の子メトリックであり、Pipeline レベルの同名メトリックとは別に計測されます。 |
 | OverallTime | 転送プロセス全体の合計時間。つまり、最初のデータパケットの送信から最後のデータパケットの正常受信確認までの時間。 |
 | RpcAvgTime | RPCの平均時間。 |
+| RpcMaxTime | 1回のRPCの最大時間。マージされたクエリプロファイルでは、`__MAX_OF_RpcMaxTime` がすべてのインスタンスにおける最大値です。 |
 | RpcCount | RPCの総数。 |
 
 #### エクスチェンジソースオペレーター

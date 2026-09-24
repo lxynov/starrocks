@@ -203,6 +203,7 @@ private:
 
     std::atomic<int64_t> _rpc_count = 0;
     std::atomic<int64_t> _rpc_cumulative_time = 0;
+    std::atomic<int64_t> _rpc_max_time = 0;
 
     std::unique_ptr<MemTracker> _buffered_mem_usage;
     // RuntimeProfile counters

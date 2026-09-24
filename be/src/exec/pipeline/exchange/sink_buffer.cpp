@@ -191,6 +191,7 @@ bool SinkBuffer::is_finished() const {
 void SinkBuffer::update_profile(RuntimeProfile* profile) {
     RuntimeProfile::Counter* rpc_count = ADD_COUNTER(profile, "RpcCount", TUnit::UNIT);
     RuntimeProfile::Counter* rpc_avg_timer = ADD_TIMER(profile, "RpcAvgTime");
+    RuntimeProfile::Counter* rpc_max_timer = ADD_TIMER(profile, "RpcMaxTime");
     RuntimeProfile::Counter* network_timer = ADD_TIMER(profile, "NetworkTime");
     RuntimeProfile::Counter* wait_timer = ADD_TIMER(profile, "WaitTime");
     RuntimeProfile::Counter* buffer_full_timer = ADD_CHILD_TIMER(profile, "BufferFullTime", "WaitTime");
@@ -199,6 +200,7 @@ void SinkBuffer::update_profile(RuntimeProfile* profile) {
 
     COUNTER_SET(rpc_count, _rpc_count.load());
     COUNTER_SET(rpc_avg_timer, _rpc_cumulative_time / std::max(_rpc_count.load(), static_cast<int64_t>(1)));
+    COUNTER_SET(rpc_max_timer, _rpc_max_time.load());
 
     COUNTER_SET(network_timer, _network_time());
     COUNTER_SET(overall_timer, _last_receive_time - _first_send_time);
@@ -285,6 +287,9 @@ void SinkBuffer::_update_network_time(const TUniqueId& instance_id, const int64_
     context.network_time.update(time_usage, concurrency);
     _rpc_cumulative_time += time_usage;
     _rpc_count++;
+    int64_t max_time = _rpc_max_time.load();
+    while (time_usage > max_time && !_rpc_max_time.compare_exchange_weak(max_time, time_usage)) {
+    }
 }
 
 void SinkBuffer::_process_send_window(const TUniqueId& instance_id, const int64_t sequence) {

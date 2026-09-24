@@ -305,6 +305,7 @@ Exchange Operator 负责在 BE 节点之间传输数据。可以有几种交换�
 | PendingFinishTime | 从发送端缓冲区开始进入结束阶段到更新 Profile 时的经过时间；进入结束阶段前为零。属于 `WaitTime` 的子指标，与 Pipeline 级别的同名指标分别统计。 |
 | OverallTime | 整个传输过程的总时间，即从发送第一个数据包到确认最后一个数据包正确接收的时间。 |
 | RpcAvgTime | RPC 的平均时间。 |
+| RpcMaxTime | 单次 RPC 的最长时间。在合并后的查询 Profile 中，`__MAX_OF_RpcMaxTime` 是所有 Instance 中的最大值。 |
 | RpcCount | RPC 的总次数。 |
 
 #### Exchange Source Operator

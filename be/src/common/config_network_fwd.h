@@ -48,6 +48,12 @@ CONF_Int32(brpc_max_connections_per_server, "1");
 // The expire time of BRPC stub cache, default 60 minutes.
 CONF_mInt32(brpc_stub_expire_s, "3600"); // 60 minutes
 
+// The interval of the background check that resets the BRPC stubs whose connection has failed. BRPC health-checks
+// a failed connection every few seconds until its channel is destroyed, and logs "Fail to wait EPOLLOUT" on every
+// check against an unreachable address, such as the old IP of a restarted pod. Resetting the stub destroys the
+// channel; the new channel doesn't connect until the stub sends its next RPC. A value <= 0 disables the check.
+CONF_mInt32(brpc_failed_channel_reset_interval_s, "10");
+
 // Whether to resolve backend hostnames to IP addresses in generated error URLs.
 // - true: StarRocks will attempt to resolve hostnames to IPs.
 //  Useful in debugging scenarios where internal hostnames (e.g., K8s pod names)

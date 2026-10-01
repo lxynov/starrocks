@@ -58,6 +58,10 @@ class MetricRegistry;
 
 constexpr int TIMER_TASK_RUNNING = 1;
 
+// Resets the cached stubs whose connection has failed, every config::brpc_failed_channel_reset_interval_s.
+template <typename StubCacheT>
+class FailedChannelResetTask;
+
 template <typename StubCacheT>
 class EndpointCleanupTask : public BthreadTimerTask {
 public:
@@ -126,6 +130,7 @@ public:
 
 private:
     friend class EndpointCleanupTask<BrpcStubCache>;
+    friend class FailedChannelResetTask<BrpcStubCache>;
 
     template <typename CacheT, typename ExtractFn>
     friend void wait_clean_tasks_terminate(CacheT* cache, ExtractFn extract);
@@ -141,6 +146,8 @@ private:
 
     bool replace_cleanup_task_locked(const butil::EndPoint& endpoint,
                                      std::shared_ptr<EndpointCleanupTask<BrpcStubCache>> task);
+
+    void reset_failed_channels();
 
     struct Metrics;
     struct StubPool {
@@ -158,6 +165,8 @@ private:
     BthreadTimer* _timer;
     std::unique_ptr<Metrics> _metrics;
     bool _stopping{false};
+    // The scheduled or running task. Each run schedules a new one.
+    std::shared_ptr<FailedChannelResetTask<BrpcStubCache>> _channel_reset_task;
 };
 
 class HttpBrpcStubCache {
@@ -218,6 +227,7 @@ private:
     ~LakeServiceBrpcStubCache();
     void bind_timer(BthreadTimer* timer);
     friend class EndpointCleanupTask<LakeServiceBrpcStubCache>;
+    friend class FailedChannelResetTask<LakeServiceBrpcStubCache>;
 
     template <typename CacheT, typename ExtractFn>
     friend void wait_clean_tasks_terminate(CacheT* cache, ExtractFn extract);
@@ -234,6 +244,11 @@ private:
     bool replace_cleanup_task_locked(const butil::EndPoint& endpoint,
                                      std::shared_ptr<EndpointCleanupTask<LakeServiceBrpcStubCache>> task);
 
+    // The stub can share a connection with the first stub of the endpoint in BrpcStubCache, since both use
+    // connection_group "0_<epoch>". BRPC keeps health-checking a failed connection until every channel on it is
+    // destroyed, so this cache must reset its stubs as well.
+    void reset_failed_channels();
+
     struct StubEntry {
         std::shared_ptr<LakeService_RecoverableStub> stub;
         std::shared_ptr<EndpointCleanupTask<LakeServiceBrpcStubCache>> cleanup_task;
@@ -243,6 +258,8 @@ private:
     butil::FlatMap<butil::EndPoint, StubEntry> _stub_map;
     BthreadTimer* _timer;
     bool _stopping{false};
+    // The scheduled or running task. Each run schedules a new one.
+    std::shared_ptr<FailedChannelResetTask<LakeServiceBrpcStubCache>> _channel_reset_task;
 };
 #endif
 

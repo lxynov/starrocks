@@ -46,11 +46,13 @@
 
 namespace starrocks {
 
+#ifdef WITH_TENANN
 namespace {
 
 constexpr int kVectorIndexCacheAsyncLoadMaxQueueSize = 4096;
 
 } // namespace
+#endif
 
 StorageEnv* StorageEnv::GetInstance() {
     static StorageEnv s_storage_env;

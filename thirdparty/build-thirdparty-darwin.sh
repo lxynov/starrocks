@@ -141,23 +141,6 @@ __hash_memory(const void* __ptr, size_t __size) noexcept {
 EOF
 }
 
-ensure_macos_libtool_wrapper() {
-    local wrapper_dir="${TP_DIR}/build/libtool-wrapper"
-    local wrapper_path="${wrapper_dir}/libtool"
-
-    mkdir -p "${wrapper_dir}"
-    cat > "${wrapper_path}" <<'EOF'
-#!/usr/bin/env bash
-if [[ "$1" == "-V" ]]; then
-    /usr/bin/libtool -V 2>&1
-    exit $?
-fi
-exec /usr/bin/libtool "$@"
-EOF
-    chmod +x "${wrapper_path}"
-    echo "${wrapper_path}"
-}
-
 append_object_to_archive() {
     local archive="$1"
     local object_file="$2"
@@ -898,6 +881,7 @@ build_rocksdb() {
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DBUILD_SHARED_LIBS=OFF \
         -DROCKSDB_BUILD_SHARED=OFF \
+        -DUSE_RTTI=ON \
         -DCMAKE_CXX_FLAGS="$(append_flags "${CXXFLAGS}" "-D_LIBCPP_HAS_NO_HASH_MEMORY=1 -Wno-error")" \
         -DCMAKE_C_FLAGS="$(append_flags "${CFLAGS}" "-Wno-error")" \
         -DFAIL_ON_WARNINGS=OFF \
@@ -2061,15 +2045,14 @@ build_arrow() {
     fi
 
     local arrow_prefix_path="${TP_INSTALL_DIR};${flatbuffers_prefix};${snappy_prefix};${lz4_prefix};${brotli_prefix};${zlib_prefix};${zstd_prefix};${rapidjson_prefix}"
-    local libtool_wrapper
-    libtool_wrapper="$(ensure_macos_libtool_wrapper)"
 
+    # Leave CMAKE_LIBTOOL unset: Arrow 24 locates Apple's libtool itself, while
+    # its check of a caller-provided CMAKE_LIBTOOL always rejects it.
     "${CMAKE_CMD}" .. \
         -G "${CMAKE_GENERATOR}" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="${TP_INSTALL_DIR}" \
         -DCMAKE_INSTALL_LIBDIR=lib \
-        -DCMAKE_LIBTOOL="${libtool_wrapper}" \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DBUILD_SHARED_LIBS=OFF \
         -DARROW_BUILD_STATIC=ON \
@@ -2129,6 +2112,7 @@ build_arrow() {
         -DBoost_DIR="${TP_INSTALL_DIR}" \
         -DBoost_ROOT="${TP_INSTALL_DIR}" \
         -DARROW_BOOST_USE_SHARED=OFF \
+        -DBoost_USE_STATIC_RUNTIME=ON \
         -DBoost_NO_BOOST_CMAKE=ON \
         -DARROW_FLIGHT=ON \
         -DARROW_FLIGHT_SQL=ON \
@@ -2187,22 +2171,17 @@ build_arrow() {
     sync_lib64_links
 }
 
-build_formula_librdkafka() {
-    if [[ "${STARROCKS_USE_NIX_DEPS:-0}" == "1" ]]; then
-        build_librdkafka
-        return
+build_librdkafka() {
+    # Earlier runs linked Homebrew's librdkafka, which is built against a different OpenSSL major
+    # version than the one BE links. Drop those links so the pinned version is built from source.
+    if [[ -L "${TP_INCLUDE_DIR}/librdkafka" ]]; then
+        rm -f "${TP_INCLUDE_DIR}/librdkafka"
+        safe_remove_glob \
+            "${TP_INSTALL_DIR}/lib/librdkafka"* \
+            "${TP_INSTALL_DIR}/lib64/librdkafka"* \
+            "${TP_INSTALL_DIR}/lib/pkgconfig/rdkafka"*.pc
     fi
 
-    ensure_formula librdkafka
-    local prefix
-    prefix="$(formula_prefix librdkafka)"
-    link_if_missing "${prefix}/include/librdkafka" "${TP_INCLUDE_DIR}/librdkafka"
-    link_matching_if_missing "${TP_INSTALL_DIR}/lib" "${prefix}/lib/librdkafka.a" "${prefix}/lib/librdkafka++.a" "${prefix}/lib/librdkafka"*.dylib "${prefix}/lib/librdkafka++"*.dylib
-    link_formula_metadata "${prefix}"
-    sync_lib64_links
-}
-
-build_librdkafka() {
     if [[ -f "${TP_INSTALL_DIR}/lib/librdkafka.a" && -f "${TP_INSTALL_DIR}/lib/librdkafka++.a" \
           && -d "${TP_INCLUDE_DIR}/librdkafka" ]]; then
         return 0
@@ -2239,7 +2218,7 @@ build_librdkafka() {
         -DWITH_SASL_SCRAM=ON \
         -DOPENSSL_ROOT_DIR="${TP_INSTALL_DIR}" \
         -DZSTD_ROOT="${zstd_prefix}" \
-        -DZSTD_INCLUDE_DIR="${zstd_prefix}/include" \
+        -DZSTD_INCLUDE_DIR="${zstd_prefix}/include/zstd" \
         -DZSTD_LIBRARY="${zstd_prefix}/lib/libzstd.a" \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
@@ -3266,7 +3245,7 @@ for package in "${packages[@]}"; do
             build_arrow
             ;;
         librdkafka)
-            build_formula_librdkafka
+            build_librdkafka
             ;;
         pulsar)
             build_formula_pulsar

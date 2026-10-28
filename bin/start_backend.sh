@@ -25,7 +25,25 @@ MACHINE_TYPE=$(uname -m)
 curdir=`dirname "$0"`
 curdir=`cd "$curdir"; pwd`
 
-OPTS=$(getopt \
+# macOS compatibility: use GNU getopt
+GETOPT_BIN="getopt"
+if [[ "$OSTYPE" == darwin* ]]; then
+    # Try to detect gnu-getopt path dynamically
+    if command -v brew &> /dev/null; then
+        GNU_GETOPT_PREFIX=$(brew --prefix gnu-getopt 2>/dev/null)
+        if [[ -n "${GNU_GETOPT_PREFIX}" ]] && [[ -x "${GNU_GETOPT_PREFIX}/bin/getopt" ]]; then
+            GETOPT_BIN="${GNU_GETOPT_PREFIX}/bin/getopt"
+        else
+            echo "gnu-getopt is required on macOS. Please install it with 'brew install gnu-getopt'."
+            exit 1
+        fi
+    else
+        echo "Homebrew is required on macOS to install gnu-getopt. Please install Homebrew first."
+        exit 1
+    fi
+fi
+
+OPTS=$(${GETOPT_BIN} \
     -n $0 \
     -o '' \
     -l 'daemon' \
@@ -178,6 +196,12 @@ else
     export LD_LIBRARY_PATH=$STARROCKS_HOME/lib/jemalloc:$LD_LIBRARY_PATH
 fi
 
+# macOS dyld ignores LD_LIBRARY_PATH, and starrocks_be loads libjvm as @rpath/libjvm.dylib without
+# an LC_RPATH, so hand the same directories to dyld as fallback search paths.
+if [[ "$OSTYPE" == darwin* ]]; then
+    export DYLD_FALLBACK_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib:/usr/lib
+fi
+
 # Set JEMALLOC_CONF environment variable if not already set
 if [[ -z "$JEMALLOC_CONF" ]]; then
     if [ ${RUN_JEMALLOC_DEBUG} -eq 1 ] ; then
@@ -264,8 +288,13 @@ echo "start time: $(date), server uptime: $(uptime)"
 echo "Run with JEMALLOC_CONF: '$JEMALLOC_CONF'"
 
 if [ ${RUN_DAEMON} -eq 1 ]; then
-    nohup ${START_BE_CMD} "$@" </dev/null &
-    
+    if [[ "$OSTYPE" == darwin* ]]; then
+        # /usr/bin/nohup is SIP-protected, so exec'ing it would drop DYLD_* variables; ignore SIGHUP in a subshell instead.
+        (trap '' HUP; exec ${START_BE_CMD} "$@" </dev/null) &
+    else
+        nohup ${START_BE_CMD} "$@" </dev/null &
+    fi
+
     if [ ${ENABLE_PROFILE} -eq 1 ]; then
         ${STARROCKS_HOME}/bin/collect_be_profile.sh --daemon
         echo "Profile collection daemon started"

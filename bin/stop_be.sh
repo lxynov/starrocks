@@ -43,7 +43,25 @@ pidfile=$PID_DIR/be.pid
 SIG=9
 TIME_OUT=-1
 
-OPTS=$(getopt \
+# macOS compatibility: use GNU getopt
+GETOPT_BIN="getopt"
+if [[ "$OSTYPE" == darwin* ]]; then
+    # Try to detect gnu-getopt path dynamically
+    if command -v brew &> /dev/null; then
+        GNU_GETOPT_PREFIX=$(brew --prefix gnu-getopt 2>/dev/null)
+        if [[ -n "${GNU_GETOPT_PREFIX}" ]] && [[ -x "${GNU_GETOPT_PREFIX}/bin/getopt" ]]; then
+            GETOPT_BIN="${GNU_GETOPT_PREFIX}/bin/getopt"
+        else
+            echo "gnu-getopt is required on macOS. Please install it with 'brew install gnu-getopt'."
+            exit 1
+        fi
+    else
+        echo "Homebrew is required on macOS to install gnu-getopt. Please install Homebrew first."
+        exit 1
+    fi
+fi
+
+OPTS=$(${GETOPT_BIN} \
   -n $0 \
   -o gh \
   -l 'graceful' \
@@ -103,6 +121,8 @@ fi
 if [ -f $pidfile ]; then
     pid=`cat $pidfile`
     pidcomm=`ps -p $pid -o comm=`
+    # macOS ps prints the full executable path rather than just its name
+    pidcomm=${pidcomm##*/}
     if [ "starrocks_be"x != "$pidcomm"x ]; then
         echo "ERROR: pid process may not be BE"
         exit 1

@@ -84,6 +84,7 @@ int32_t parse_pulsar_partition_index(const std::string& logical_topic, const std
     return -1;
 }
 
+#ifndef __APPLE__
 namespace {
 
 // Render a Pulsar MessageId as a stable string for the __message_id__ column. operator<< is what the
@@ -95,6 +96,7 @@ std::string pulsar_message_id_to_string(const pulsar::MessageId& id) {
 }
 
 } // namespace
+#endif
 
 void build_kafka_message_meta(RdKafka::Message& msg, const std::string& topic, bool need_meta, bool need_key,
                               bool need_headers, StreamMessageMeta* meta) {

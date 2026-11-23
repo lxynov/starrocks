@@ -1802,8 +1802,9 @@ public class FunctionSet {
             addBuiltin(AggregateFunction.createBuiltin(HISTOGRAM,
                     Lists.newArrayList(t, IntegerType.INT, FloatType.DOUBLE, VarcharType.VARCHAR), VarcharType.VARCHAR,
                     VarcharType.VARCHAR, false, false, false));
+            // The intermediate state is one serialized HyperLogLog per bucket.
             addBuiltin(AggregateFunction.createBuiltin(HISTOGRAM_HLL_NDV,
-                    Lists.newArrayList(t, VarcharType.VARCHAR), VarcharType.VARCHAR, VarcharType.VARCHAR,
+                    Lists.newArrayList(t, VarcharType.VARCHAR), VarcharType.VARCHAR, VarbinaryType.VARBINARY,
                     false, false, false));
         }
 

@@ -1658,6 +1658,84 @@ TEST_F(AggregateTest, test_histogram_hll_ndv) {
     ASSERT_EQ("['[[\"0\",\"1023\",\"1026\",\"1\",\"1011\"]]']", result_column->debug_string());
 }
 
+// The partial states of several instances merge into the result one instance computes over all the rows.
+TEST_F(AggregateTest, test_histogram_hll_ndv_multi_stage) {
+    std::vector<TypeDescriptor> arg_types = {TYPE_BIGINT_DESC, TYPE_VARCHAR_DESC};
+    auto return_type = TYPE_VARCHAR_DESC;
+    std::unique_ptr<FunctionContext> local_ctx(FunctionContext::create_test_context(std::move(arg_types), return_type));
+
+    const AggregateFunction* func = get_aggregate_function("histogram_hll_ndv", TYPE_BIGINT, TYPE_VARCHAR, false);
+
+    auto data_column = gen_histogram_column<int64_t>();
+    auto buckets_column = ColumnHelper::create_const_column<TYPE_VARCHAR>(
+            R"([["0","100","102","2"],["101","511","520","1"],["512","1023","1026","1"]])", data_column->size());
+    Columns const_columns;
+    const_columns.emplace_back(data_column);
+    const_columns.emplace_back(buckets_column);
+    local_ctx->set_constant_columns(const_columns);
+
+    auto finalize = [&](AggDataPtr state) {
+        auto result = BinaryColumn::create();
+        func->finalize_to_column(local_ctx.get(), state, result.get());
+        return result->get_slice(0).to_string();
+    };
+
+    // One stage over all the rows.
+    auto single = ManagedAggrState::create(local_ctx.get(), func);
+    std::vector<const Column*> raw_columns = {data_column.get(), buckets_column.get()};
+    func->update_batch_single_state(local_ctx.get(), data_column->size(), raw_columns.data(), single->state());
+    const std::string expected = finalize(single->state());
+    // The distinct counts are HyperLogLog estimates: the last two buckets hold 411 and 512 distinct values.
+    ASSERT_EQ(R"([["0","100","102","2","101"],["101","511","520","1","409"],["512","1023","1026","1","510"]])",
+              expected);
+
+    // Two instances, each over half of the rows, and a third that saw no row at all.
+    MutableColumnPtr partials = BinaryColumn::create();
+    const size_t half = data_column->size() / 2;
+    for (size_t part = 0; part < 2; ++part) {
+        auto part_column = data_column->clone_empty();
+        part_column->append(*data_column, part * half, part == 0 ? half : data_column->size() - half);
+        auto state = ManagedAggrState::create(local_ctx.get(), func);
+        raw_columns[0] = part_column.get();
+        func->update_batch_single_state(local_ctx.get(), part_column->size(), raw_columns.data(), state->state());
+        func->serialize_to_column(local_ctx.get(), state->state(), partials.get());
+    }
+    auto empty = ManagedAggrState::create(local_ctx.get(), func);
+    func->serialize_to_column(local_ctx.get(), empty->state(), partials.get());
+    ASSERT_EQ(3, partials->size());
+
+    auto merged = ManagedAggrState::create(local_ctx.get(), func);
+    for (size_t i = 0; i < partials->size(); ++i) {
+        func->merge(local_ctx.get(), partials.get(), merged->state(), i);
+    }
+    ASSERT_FALSE(local_ctx->has_error()) << local_ctx->error_msg();
+    ASSERT_EQ(expected, finalize(merged->state()));
+
+    // Merging only empty partial states is the same as seeing no row.
+    auto merged_empty = ManagedAggrState::create(local_ctx.get(), func);
+    func->merge(local_ctx.get(), partials.get(), merged_empty->state(), 2);
+    ASSERT_EQ("[]", finalize(merged_empty->state()));
+
+    // The streaming path turns every row into a state of its own.
+    MutableColumnPtr converted = BinaryColumn::create();
+    func->convert_to_serialize_format(local_ctx.get(), const_columns, data_column->size(), converted);
+    ASSERT_EQ(data_column->size(), converted->size());
+    auto streamed = ManagedAggrState::create(local_ctx.get(), func);
+    for (size_t i = 0; i < converted->size(); ++i) {
+        func->merge(local_ctx.get(), converted.get(), streamed->state(), i);
+    }
+    ASSERT_FALSE(local_ctx->has_error()) << local_ctx->error_msg();
+    ASSERT_EQ(expected, finalize(streamed->state()));
+
+    // A partial state that was built for other buckets is refused.
+    MutableColumnPtr mismatched = BinaryColumn::create();
+    const uint32_t one_bucket = 1;
+    std::string bytes(reinterpret_cast<const char*>(&one_bucket), sizeof(one_bucket));
+    down_cast<BinaryColumn*>(mismatched.get())->append(Slice(bytes));
+    func->merge(local_ctx.get(), mismatched.get(), merged->state(), 0);
+    ASSERT_TRUE(local_ctx->has_error());
+}
+
 MutableColumnPtr gen_histogram_string_column() {
     auto column = BinaryColumn::create();
     for (int i = 0; i < 1024; i++) {

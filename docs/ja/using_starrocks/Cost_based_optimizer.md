@@ -313,13 +313,17 @@ ANALYZE FULL TABLE tbl_name PREDICATE COLUMNS
 #### ヒストグラムを手動で収集する
 
 ```SQL
-ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
+ANALYZE [FULL | SAMPLE] TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 [WITH SYNC | ASYNC MODE]
 [WITH N BUCKETS]
 [PROPERTIES (property [,property])]
 ```
 
 パラメータの説明：
+
+- `FULL | SAMPLE`: 読み取るデータの量。
+  - `SAMPLE`（どちらのキーワードも指定しない場合のデフォルト）: テーブルのサンプルからヒストグラムを収集します。サンプルの行数は、以下で説明するプロパティによって制御されます。
+  - `FULL`: すべての行を読み取ります。`histogram_sample_ratio` は無視され、行数は `histogram_max_sample_row_count` による制限を受けないため、MCV のカウントとバケットごとの異なる値の数にサンプリング誤差がありません。`FULL` は StarRocks 内部テーブルでのみサポートされ、`histogram_collect_mode` が `sketch` である必要があります。そうでない場合はエラーが返されます。
 
 - `col_name`: 統計を収集する列。複数の列をカンマ（`,`）で区切ります。このパラメータが指定されていない場合、テーブル全体が収集されます。ヒストグラムにはこのパラメータが必要です。
 
@@ -337,10 +341,20 @@ ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 | histogram_sample_ratio            | FLOAT    | 0.1               | ヒストグラムのサンプリング比率。                          |
 | histogram_max_sample_row_count    | LONG     | 10000000          | ヒストグラムのために収集する最大行数。       |
 | histogram_collect_bucket_ndv_mode | STRING   | none              | ヒストグラムバケットごとの重複排除カウント (NDV) を推定するモード。`none` (デフォルト、重複排除カウントは収集されません)、`hll` (HyperLogLog を使用して正確に推定)、または `sample` (低オーバーヘッドのサンプルベースの推定器を使用)。 |
+| histogram_collect_mode | STRING | sort | 内部テーブルのヒストグラムを収集するモード。有効な値: `sort` と `sketch`。[収集モード](#収集モード) を参照してください。このプロパティが指定されていない場合、FE 設定項目 `histogram_collect_mode` が使用されます。 |
 
-ヒストグラムのために収集する行数は、複数のパラメータによって制御されます。それは `statistic_sample_collect_rows` とテーブル行数 * `histogram_sample_ratio` の間の大きい値です。この数は `histogram_max_sample_row_count` で指定された値を超えることはできません。値を超えた場合、`histogram_max_sample_row_count` が優先されます。
+ヒストグラムのために収集する行数は、複数のパラメータによって制御されます。それは `statistic_sample_collect_rows` とテーブル行数 * `histogram_sample_ratio` の間の大きい値です。この数は `histogram_max_sample_row_count` で指定された値を超えることはできません。値を超えた場合、`histogram_max_sample_row_count` が優先されます。`FULL` が指定されている場合、これらのパラメータは適用されません。
 
 実際に使用されるプロパティは、SHOW ANALYZE STATUS の出力の `Properties` 列で確認できます。
+
+##### 収集モード
+
+StarRocks 内部テーブルのヒストグラムは、2 つのモードのいずれかで収集できます。モードはプロパティ `histogram_collect_mode` で指定し、プロパティが指定されていない場合は同名の FE 設定項目で決まります。どちらのモードでも、ヒストグラムは同じ形式で保存されます。
+
+- `sort`（デフォルト）: StarRocks は列ごとに 2 つのクエリを実行します。1 つ目のクエリは MCV を見つけます。2 つ目のクエリは残りのサンプル値をソートし、単一スレッドでバケットを構築します。
+- `sketch`: StarRocks はマージ可能なスケッチを構築します。MCV には [`ds_frequent`](../sql-reference/sql-functions/aggregate-functions/ds_frequent.md) を、バケットには [`ds_kll`](../sql-reference/sql-functions/aggregate-functions/ds_kll.md) を使用します。スケッチはソート済みの入力を必要としないため、1 つのクエリで多数の列を収集でき、通常の多段階集計として実行されます。固定長型の列は、1 つのクエリにつき最大 `histogram_sketch_max_columns_per_query`（FE 設定項目、デフォルト: 128）列ずつまとめて収集され、文字列列はそれぞれ専用のクエリで収集されます。バケットの境界は近似値です。各境界の順位と正確な順位との差は、行数の約 0.7% 以内です。
+
+内部テーブルの収集タスクについて、SHOW ANALYZE STATUS の出力の `Properties` 列には、タスクの実行状況が表示されます。使用されたモード（`histogram_collect_mode`）、実行された統計情報クエリの数（`histogram_collect_queries`）、および経過時間（`histogram_collect_elapsed_ms`、単位: ミリ秒）です。
 
 例
 
@@ -359,6 +373,18 @@ PROPERTIES(
 ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON v3
 PROPERTIES(
    "histogram_collect_bucket_ndv_mode" = "hll"
+);
+
+-- スケッチを使用して v1 と v2 のヒストグラムを収集します。
+ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON v1,v2
+PROPERTIES(
+   "histogram_collect_mode" = "sketch"
+);
+
+-- テーブルのすべての行から v1 と v2 のヒストグラムを収集します。
+ANALYZE FULL TABLE tbl_name UPDATE HISTOGRAM ON v1,v2
+PROPERTIES(
+   "histogram_collect_mode" = "sketch"
 );
 ```
 
@@ -383,7 +409,7 @@ CREATE ANALYZE [FULL|SAMPLE] TABLE tbl_name (col_name [,col_name])
 [PROPERTIES (property [,property])]
 
 -- テーブル内の指定された列のヒストグラムを自動的に収集します。
-CREATE ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
+CREATE ANALYZE [FULL|SAMPLE] TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 [WITH SYNC | ASYNC MODE]
 [WITH N BUCKETS]
 [PROPERTIES (property [,property])]
@@ -395,6 +421,7 @@ CREATE ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
   - FULL: 完全収集を示します。
   - SAMPLE: サンプル収集を示します。
   - 収集タイプが指定されていない場合、`CREATE ANALYZE TABLE` では完全収集、`CREATE ANALYZE ALL` および `CREATE ANALYZE DATABASE` ではサンプル収集が使用されます。
+  - `UPDATE HISTOGRAM` の場合、収集タイプが指定されていなければサンプル収集が使用され、FULL には `histogram_collect_mode` が `sketch` である必要があります。詳細は [ヒストグラムを手動で収集する](#ヒストグラムを手動で収集する) を参照してください。
 
 - `col_name`: 統計を収集する列。複数の列をカンマ（`,`）で区切ります。このパラメータが指定されていない場合、テーブル全体が収集されます。
 

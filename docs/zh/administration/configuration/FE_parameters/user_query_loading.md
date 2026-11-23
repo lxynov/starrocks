@@ -649,6 +649,19 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述: 直方图的默认 bucket 数量。
 - 引入版本: -
 
+### `histogram_collect_mode`
+
+- 默认值: sort
+- 类型: String
+- 单位: -
+- 是否可变: Yes
+- 描述: 当 ANALYZE 语句未指定 `histogram_collect_mode` 属性时，StarRocks 内表直方图的采集方式。有效值：
+  - `sort`：StarRocks 为每一列执行两条查询。第二条查询对该列的采样值排序，并在单个线程上构建分桶。
+  - `sketch`：StarRocks 构建可合并的草图，使用频繁项草图获取 MCV，使用 KLL 草图获取分桶。一条查询可以采集多列，并作为普通的多阶段聚合执行。`ANALYZE FULL TABLE ... UPDATE HISTOGRAM` 需要使用该模式。
+
+  未指定该属性的采集任务使用任务运行时该参数的值。该参数不适用于外部表。
+- 引入版本: -
+
 ### `histogram_max_sample_row_count`
 
 - 默认值: 10000000
@@ -674,6 +687,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 单位: -
 - 是否可变: Yes
 - 描述: 直方图的采样率。
+- 引入版本: -
+
+### `histogram_sketch_max_columns_per_query`
+
+- 默认值: 128
+- 类型: Int
+- 单位: -
+- 是否可变: Yes
+- 描述: 以 `sketch` 模式采集直方图时，一条查询最多为多少个定长类型的列构建草图。该参数用于限制一条查询在草图上使用的内存。字符串列始终由单独的一条查询采集，因为字符串草图的大小取决于字符串的长度。采集每个分桶的不同值数量的查询最多处理 16 列。
 - 引入版本: -
 
 ### `http_slow_request_threshold_ms`

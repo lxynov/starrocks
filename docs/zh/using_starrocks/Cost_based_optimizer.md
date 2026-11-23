@@ -305,13 +305,17 @@ ANALYZE FULL TABLE tbl_name PREDICATE COLUMNS
 #### 手动采集直方图统计信息
 
 ```SQL
-ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
+ANALYZE [FULL | SAMPLE] TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 [WITH SYNC | ASYNC MODE]
 [WITH N BUCKETS]
 [PROPERTIES (property [,property])]
 ```
 
 参数说明：
+
+- `FULL | SAMPLE`: 读取多少数据。
+  - `SAMPLE`（未指定关键字时的默认值）：基于表的抽样数据采集直方图。抽样行数由下文的属性控制。
+  - `FULL`：读取所有行。此时忽略 `histogram_sample_ratio`，行数也不受 `histogram_max_sample_row_count` 的限制，因此 MCV 的计数和每个分桶的不同值数量没有抽样误差。`FULL` 仅支持 StarRocks 内表，并且要求 `histogram_collect_mode` 为 `sketch`，否则返回错误。
 
 - `col_name`: 要采集统计信息的列，多列使用逗号分隔。该参数必填。
 
@@ -329,10 +333,20 @@ ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 | histogram_buckets_size                      | LONG    | 64           | 直方图默认分桶数。                                                                                             |
 | histogram_max_sample_row_count    | LONG   | 10000000 | 直方图最大采样行数。                       |
 | histogram_collect_bucket_ndv_mode | STRING   | none              | 估算每个直方图桶的去重（NDV）值的模式。`none`（默认，不采集去重值）、`hll`（使用 HyperLogLog 进行精准估算）或 `sample`（使用低开销的基于采样的估算器）。 |
+| histogram_collect_mode | STRING | sort | 内表直方图的采集模式。有效值：`sort` 和 `sketch`。参见[采集模式](#采集模式)。如果不指定该属性，则使用 FE 配置项 `histogram_collect_mode`。 |
 
-直方图的采样行数由多个参数共同控制，采样行数取 `statistic_sample_collect_rows` 和表总行数 `histogram_sample_ratio` 两者中的最大值。最多不超过 `histogram_max_sample_row_count` 指定的行数。如果超过，则按照该参数定义的上限行数进行采集。
+直方图的采样行数由多个参数共同控制，采样行数取 `statistic_sample_collect_rows` 和表总行数 `histogram_sample_ratio` 两者中的最大值。最多不超过 `histogram_max_sample_row_count` 指定的行数。如果超过，则按照该参数定义的上限行数进行采集。指定 `FULL` 时，这些参数不生效。
 
 直方图任务实际执行中使用的 **PROPERTIES**，可以通过 SHOW ANALYZE STATUS 中的 **PROPERTIES** 列查看。
+
+##### 采集模式
+
+StarRocks 内表的直方图可以通过两种模式采集。采集模式由属性 `histogram_collect_mode` 指定；如果未指定该属性，则由同名的 FE 配置项决定。两种模式存储的直方图格式相同。
+
+- `sort`（默认）：StarRocks 为每一列执行两条查询。第一条查询找出 MCV。第二条查询对其余的采样值排序，并在单个线程上构建分桶。
+- `sketch`：StarRocks 构建可合并的草图，使用 [`ds_frequent`](../sql-reference/sql-functions/aggregate-functions/ds_frequent.md) 获取 MCV，使用 [`ds_kll`](../sql-reference/sql-functions/aggregate-functions/ds_kll.md) 获取分桶。草图不要求输入有序，因此一条查询可以采集多列，并作为普通的多阶段聚合执行。定长类型的列分批采集，每条查询最多采集 `histogram_sketch_max_columns_per_query`（FE 配置项，默认值：128）列；每个字符串列由单独的一条查询采集。分桶的边界是近似值：每个边界的排名与精确排名之差约在总行数的 0.7% 以内。
+
+对于内表的采集任务，SHOW ANALYZE STATUS 返回结果中的 `Properties` 列会显示任务的执行情况：使用的模式（`histogram_collect_mode`）、执行的统计信息查询数量（`histogram_collect_queries`）以及耗时（`histogram_collect_elapsed_ms`，单位：毫秒）。
 
 **示例**
 
@@ -351,6 +365,18 @@ PROPERTIES(
 ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON v3
 PROPERTIES(
    "histogram_collect_bucket_ndv_mode" = "hll"
+);
+
+-- 基于草图采集 v1 和 v2 列的直方图。
+ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON v1,v2
+PROPERTIES(
+   "histogram_collect_mode" = "sketch"
+);
+
+-- 读取表的所有行，采集 v1 和 v2 列的直方图。
+ANALYZE FULL TABLE tbl_name UPDATE HISTOGRAM ON v1,v2
+PROPERTIES(
+   "histogram_collect_mode" = "sketch"
 );
 ```
 
@@ -373,7 +399,7 @@ CREATE ANALYZE [FULL|SAMPLE] DATABASE db_name [PROPERTIES (property [,property])
 CREATE ANALYZE [FULL|SAMPLE] TABLE tbl_name (col_name [,col_name]) [PROPERTIES (property [,property])]
 
 -- 定期采集指定表、列的直方图信息。
-CREATE ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
+CREATE ANALYZE [FULL|SAMPLE] TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
 [WITH SYNC | ASYNC MODE]
 [WITH N BUCKETS]
 [PROPERTIES (property [,property])]
@@ -385,6 +411,7 @@ CREATE ANALYZE TABLE tbl_name UPDATE HISTOGRAM ON col_name [, col_name]
   - FULL：全量采集。
   - SAMPLE：抽样采集。
   - 如果不指定采集类型，`CREATE ANALYZE TABLE` 默认为全量采集，`CREATE ANALYZE ALL` 和 `CREATE ANALYZE DATABASE` 默认为抽样采集。
+  - 对于 `UPDATE HISTOGRAM`，如果不指定采集类型，默认为抽样采集；FULL 要求 `histogram_collect_mode` 为 `sketch`。更多信息，请参见[手动采集直方图统计信息](#手动采集直方图统计信息)。
 
 - `col_name`: 要采集统计信息的列，多列使用逗号 (,)分隔。如果不指定，表示采集整张表的信息。
 

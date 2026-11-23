@@ -650,6 +650,19 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Description: The default bucket number for a histogram.
 - Introduced in: -
 
+### `histogram_collect_mode`
+
+- Default: sort
+- Type: String
+- Unit: -
+- Is mutable: Yes
+- Description: The way the histogram of a StarRocks native table is collected when the `histogram_collect_mode` property is not specified in the ANALYZE statement. Valid values:
+  - `sort`: StarRocks runs two queries for each column. The second query sorts the sampled values of the column and builds the buckets on a single thread.
+  - `sketch`: StarRocks builds mergeable sketches, a frequent items sketch for the most common values and a KLL sketch for the buckets. One query collects many columns and runs as an ordinary multi-stage aggregation. This mode is required by `ANALYZE FULL TABLE ... UPDATE HISTOGRAM`.
+
+  A collection task that does not specify the property uses the value this parameter has when the task runs. This parameter does not apply to external tables.
+- Introduced in: -
+
 ### `histogram_max_sample_row_count`
 
 - Default: 10000000
@@ -675,6 +688,15 @@ Starting from version 3.3.0, the system defaults to refreshing one partition at 
 - Unit: -
 - Is mutable: Yes
 - Description: The sampling ratio for a histogram.
+- Introduced in: -
+
+### `histogram_sketch_max_columns_per_query`
+
+- Default: 128
+- Type: Int
+- Unit: -
+- Is mutable: Yes
+- Description: The maximum number of fixed-size columns for which one query builds sketches when histograms are collected in the `sketch` mode. This parameter bounds the memory that one query uses for sketches. A string column is always collected by a query of its own, because the size of a sketch of strings depends on the length of the strings. The query that collects the number of distinct values of each bucket handles at most 16 columns.
 - Introduced in: -
 
 ### `http_slow_request_threshold_ms`

@@ -82,6 +82,7 @@ public class DecimalV3FunctionAnalyzer {
                     .add(FunctionSet.APPROX_TOP_K)
                     .add(FunctionSet.HISTOGRAM)
                     .add(FunctionSet.HISTOGRAM_HLL_NDV)
+                    .add(FunctionSet.DS_KLL)
                     .add(FunctionSet.ARRAY_UNIQUE_AGG) // array_unique_agg(array<decimal>) -> array<decimal>
                     .addAll(DECIMAL_ARRAY_AGG_FUNCTION_SAME_TYPE)
                     .build();
@@ -472,6 +473,9 @@ public class DecimalV3FunctionAnalyzer {
             Type commonType = InvalidType.INVALID;
             if (FunctionSet.HISTOGRAM.equals(fnName) || FunctionSet.HISTOGRAM_HLL_NDV.equals(fnName)) {
                 commonType = VarcharType.VARCHAR;
+            } else if (FunctionSet.DS_KLL.equals(fnName)) {
+                // The argument keeps its decimal type, which the sketch records; the result is the sketch.
+                commonType = VarbinaryType.VARBINARY;
             } else if (sameTypeAgg) {
                 commonType = argumentTypes[0];
             } else {

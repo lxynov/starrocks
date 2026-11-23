@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.analyzer;
 
+import com.starrocks.catalog.AggregateFunction;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
@@ -29,6 +30,7 @@ import com.starrocks.type.GeoTypeDescriptor;
 import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
+import com.starrocks.type.VarbinaryType;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.Assertions;
@@ -736,6 +738,33 @@ public class AnalyzeFunctionTest {
         analyzeSuccess("select ds_hll_count_distinct(v_varbinary) from tbinary");
         analyzeSuccess("select ds_theta_count_distinct(v_varbinary) from tbinary");
         analyzeSuccess("select count(distinct v_varbinary) from tbinary");
+    }
+
+    @Test
+    public void testDsKll() {
+        // Every fixed-size ordered type has a sketch.
+        for (String column : List.of("tb", "tc", "td", "te", "tf", "th", "ti", "tj")) {
+            analyzeSuccess("select ds_kll(" + column + ") from tall");
+        }
+        analyzeSuccess("select ds_kll_histogram(ds_kll(tc), 64) from tall");
+        analyzeSuccess("select ds_kll_histogram(ds_kll_union(s), 8) from " +
+                "(select tb, ds_kll(tj) as s from tall group by tb) t");
+        analyzeFail("select ds_kll(tc, 400) from tall");
+        analyzeFail("select ds_kll_histogram(ds_kll(tc)) from tall");
+
+        // A decimal argument keeps its precision and scale, which the sketch records, and both the partial and
+        // the final result are the serialized sketch.
+        QueryStatement statement = (QueryStatement) analyzeSuccess("select ds_kll(tj) from tall");
+        FunctionCallExpr call =
+                (FunctionCallExpr) ((SelectRelation) statement.getQueryRelation()).getOutputExpression().get(0);
+        AggregateFunction fn = (AggregateFunction) call.getFn();
+        ScalarType argType = (ScalarType) fn.getArgs()[0];
+        Assertions.assertTrue(argType.isDecimalV3());
+        Assertions.assertEquals(9, argType.getScalarPrecision());
+        Assertions.assertEquals(3, argType.getScalarScale());
+        Assertions.assertEquals(VarbinaryType.VARBINARY, fn.getReturnType());
+        // An aggregate function keeps no intermediate type when it is the return type.
+        Assertions.assertNull(fn.getIntermediateType());
     }
 
     @Test

@@ -535,6 +535,7 @@ def generate_cpp(path):
         "HyperloglogFunctions",
         "BitmapFunctions",
         "DsThetaFunctions",
+        "DsSketchFunctions",
         "HashFunctions",
         "GroupingSetsFunctions",
         "StructFunctions",

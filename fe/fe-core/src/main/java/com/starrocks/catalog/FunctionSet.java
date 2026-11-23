@@ -356,6 +356,9 @@ public class FunctionSet {
     public static final String DS_THETA_INTERSECT = "ds_theta_intersect";
     public static final String DS_THETA_A_NOT_B = "ds_theta_a_not_b";
     public static final String DS_THETA_INTERSECT_COND_AGG = "ds_theta_intersect_cond_agg";
+    public static final String DS_KLL = "ds_kll";
+    public static final String DS_KLL_UNION = "ds_kll_union";
+    public static final String DS_KLL_HISTOGRAM = "ds_kll_histogram";
     public static final String APPROX_TOP_K = "approx_top_k";
     public static final String AVG = "avg";
     public static final String COUNT = "count";
@@ -745,6 +748,16 @@ public class FunctionSet {
                     .addAll(DateType.DATE_TYPES)
                     .build();
 
+    // The fixed-size, totally ordered types a KLL quantiles sketch can be built over.
+    private static final Set<Type> DS_KLL_TYPES =
+            ImmutableSet.<Type>builder()
+                    .addAll(IntegerType.INTEGER_TYPES)
+                    .addAll(FloatType.FLOAT_TYPES)
+                    .addAll(DecimalType.DECIMAL_TYPES)
+                    .add(DecimalType.DECIMALV2)
+                    .addAll(DateType.DATE_TYPES)
+                    .build();
+
     private static final Set<Type> MULTI_DISTINCT_COUNT_TYPES =
             ImmutableSet.<Type>builder()
                     .addAll(IntegerType.INTEGER_TYPES)
@@ -1006,6 +1019,9 @@ public class FunctionSet {
                     .add(DS_THETA_ACCUMULATE)
                     .add(DS_THETA_COMBINE)
                     .add(DS_THETA_INTERSECT_COND_AGG)
+                    // ds_kll already returns its own state, which ds_kll_union merges.
+                    .add(DS_KLL)
+                    .add(DS_KLL_UNION)
                     // Functions with constant contexts in be are not supported.
                     .add(WINDOW_FUNNEL)
                     .add(APPROX_TOP_K)
@@ -1563,6 +1579,17 @@ public class FunctionSet {
                 true, false, true));
         // DS_THETA_ESTIMATE is registered as a scalar function via gensrc/script/functions.py.
         // It deserializes a compact theta sketch row-by-row and returns the estimate as DOUBLE.
+
+        // ds_kll(col) builds a serialized KLL quantiles sketch, and ds_kll_union(sketch) merges such sketches.
+        // DS_KLL_HISTOGRAM, which reads one, is a scalar function registered via gensrc/script/functions.py.
+        for (Type t : DS_KLL_TYPES) {
+            addBuiltin(AggregateFunction.createBuiltin(DS_KLL,
+                    Lists.newArrayList(t), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                    false, false, false));
+        }
+        addBuiltin(AggregateFunction.createBuiltin(DS_KLL_UNION,
+                Lists.newArrayList(VarbinaryType.VARBINARY), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                false, false, false));
 
         // Sum
         registerBuiltinSumAggFunction(SUM);

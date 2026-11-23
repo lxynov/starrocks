@@ -1,0 +1,489 @@
+-- name: test_histogram_sketch
+create database analyze_test_${uuid0};
+-- result:
+-- !result
+use analyze_test_${uuid0};
+-- result:
+-- !result
+CREATE TABLE `t1` (
+    `k1` date,
+    `k2` int,
+    `k3` varchar(20),
+    `k4` decimal(10, 2),
+    `k5` datetime,
+    `k6` double,
+    `k7` boolean
+)
+PROPERTIES ('replication_num' = '1');
+-- result:
+-- !result
+-- Skewed: the value i of k2 is held by 120 / i rows, rounded down, and the other columns follow k2.
+INSERT INTO t1
+WITH series AS (
+    SELECT g1 FROM TABLE(generate_series(1, 120)) AS t(g1)
+)
+SELECT date_add('2020-01-01', s1.g1), s1.g1, concat('s', s1.g1), s1.g1 / 4,
+       date_add('2020-01-01 00:00:00', interval s1.g1 hour), s1.g1 / 8, s1.g1 % 3 = 0
+FROM series s1, series s2
+WHERE s2.g1 <= 120 / s1.g1;
+-- result:
+-- !result
+INSERT INTO t1 VALUES (NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+-- result:
+-- !result
+SELECT count(*), count(k2), count(DISTINCT k2) FROM t1;
+-- result:
+603	602	120
+-- !result
+SELECT k2, count(*) FROM t1 GROUP BY k2 ORDER BY count(*) DESC, k2 LIMIT 12;
+-- result:
+1	120
+2	60
+3	40
+4	30
+5	24
+6	20
+7	17
+8	15
+9	13
+10	12
+11	10
+12	10
+-- !result
+[UC] ANALYZE FULL TABLE t1;
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t1	analyze	status	OK
+-- !result
+-- Sketch mode. A value is a most common value only if it is held by at least twice the rows an evenly spread
+-- column would give it: 602 rows over 120 values is 5 rows a value, so the values 1 to 10 qualify. Every
+-- other row goes to the buckets. With no more rows than the sketches keep exactly, the result is exact.
+[UC] ANALYZE TABLE t1 UPDATE HISTOGRAM ON k1,k2,k3,k4,k5,k6,k7 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_collect_mode' = 'sketch');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t1	histogram	status	OK
+-- !result
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t1' ORDER BY column_name;
+-- result:
+k1	[["2020-01-02","120"],["2020-01-03","60"],["2020-01-04","40"],["2020-01-05","30"],["2020-01-06","24"],["2020-01-07","20"],["2020-01-08","17"],["2020-01-09","15"],["2020-01-10","13"],["2020-01-11","12"]]
+k2	[["1","120"],["2","60"],["3","40"],["4","30"],["5","24"],["6","20"],["7","17"],["8","15"],["9","13"],["10","12"]]
+k3	[["s1","120"],["s2","60"],["s3","40"],["s4","30"],["s5","24"],["s6","20"],["s7","17"],["s8","15"],["s9","13"],["s10","12"]]
+k4	[["0.25","120"],["0.50","60"],["0.75","40"],["1.00","30"],["1.25","24"],["1.50","20"],["1.75","17"],["2.00","15"],["2.25","13"],["2.50","12"]]
+k5	[["2020-01-01 01:00:00","120"],["2020-01-01 02:00:00","60"],["2020-01-01 03:00:00","40"],["2020-01-01 04:00:00","30"],["2020-01-01 05:00:00","24"],["2020-01-01 06:00:00","20"],["2020-01-01 07:00:00","17"],["2020-01-01 08:00:00","15"],["2020-01-01 09:00:00","13"],["2020-01-01 10:00:00","12"]]
+k6	[["0.125","120"],["0.25","60"],["0.375","40"],["0.5","30"],["0.625","24"],["0.75","20"],["0.875","17"],["1","15"],["1.125","13"],["1.25","12"]]
+k7	[["0","444"],["1","158"]]
+-- !result
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t1' AND column_name IN ('k2', 'k3', 'k4', 'k7') ORDER BY column_name;
+-- result:
+k2	[["11","11","10","10"],["12","12","20","10"],["13","13","29","9"],["14","14","37","8"],["15","15","45","8"],["16","16","52","7"],["17","17","59","7"],["18","18","65","6"],["19","19","71","6"],["20","20","77","6"],["21","21","82","5"],["22","22","87","5"],["23","23","92","5"],["24","24","97","5"],["25","25","101","4"],["26","26","105","4"],["27","27","109","4"],["28","28","113","4"],["29","29","117","4"],["30","30","121","4"],["31","31","124","3"],["32","32","127","3"],["33","33","130","3"],["34","35","136","3"],["36","36","139","3"],["37","37","142","3"],["38","39","148","3"],["40","40","151","3"],["41","41","153","2"],["42","43","157","2"],["44","45","161","2"],["46","47","165","2"],["48","49","169","2"],["50","51","173","2"],["52","53","177","2"],["54","55","181","2"],["56","57","185","2"],["58","59","189","2"],["60","62","193","1"],["63","66","197","1"],["67","70","201","1"],["71","73","204","1"],["74","77","208","1"],["78","81","212","1"],["82","85","216","1"],["86","89","220","1"],["90","93","224","1"],["94","97","228","1"],["98","101","232","1"],["102","105","236","1"],["106","109","240","1"],["110","113","244","1"],["114","117","248","1"],["118","120","251","1"]]
+k3	[["Infinity","Infinity","251","0"]]
+k4	[["2.75","2.75","10","10"],["2.75","3.00","20","5"],["3.00","3.25","29","4"],["3.25","3.50","37","4"],["3.50","3.75","45","4"],["3.75","4.00","52","3"],["4.00","4.25","59","3"],["4.25","4.50","65","3"],["4.50","4.75","71","3"],["4.75","5.00","77","3"],["5.00","5.25","82","2"],["5.25","5.50","87","2"],["5.50","5.75","92","2"],["5.75","6.00","97","2"],["6.00","6.25","101","2"],["6.25","6.50","105","2"],["6.50","6.75","109","2"],["6.75","7.00","113","2"],["7.00","7.25","117","2"],["7.25","7.50","121","2"],["7.50","7.75","124","1"],["7.75","8.00","127","1"],["8.00","8.25","130","1"],["8.25","8.75","136","3"],["8.75","9.00","139","1"],["9.00","9.25","142","1"],["9.25","9.75","148","3"],["9.75","10.00","151","1"],["10.00","10.25","153","1"],["10.25","10.75","157","2"],["10.75","11.25","161","2"],["11.25","11.75","165","2"],["11.75","12.25","169","2"],["12.25","12.75","173","2"],["12.75","13.25","177","2"],["13.25","13.75","181","2"],["13.75","14.25","185","2"],["14.25","14.75","189","2"],["14.75","15.50","193","2"],["15.50","16.50","197","2"],["16.50","17.50","201","2"],["17.50","18.25","204","1"],["18.25","19.25","208","2"],["19.25","20.25","212","2"],["20.25","21.25","216","2"],["21.25","22.25","220","2"],["22.25","23.25","224","2"],["23.25","24.25","228","2"],["24.25","25.25","232","2"],["25.25","26.25","236","2"],["26.25","27.25","240","2"],["27.25","28.25","244","2"],["28.25","29.25","248","2"],["29.25","30.00","251","1"]]
+k7	None
+-- !result
+-- One query finds the most common values of the six fixed-size columns, one those of the string column, and
+-- one builds the buckets: three queries instead of two per column.
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_collect_queries=3[,}]' AND Properties LIKE '%histogram_collect_elapsed_ms=%';
+-- result:
+1
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 1', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 5', 'cardinality: 24')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 10', 'cardinality: 12')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 11', 'cardinality: 10')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 12', 'cardinality: 10')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 40', 'cardinality: 3')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 <= 10', 'cardinality: 351')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 BETWEEN 20 AND 30', 'cardinality: 50')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-02"', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-12"', 'cardinality: 10')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 <= "2020-01-21"', 'cardinality: 428')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s1"', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s50"', 'cardinality: 2')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k4 = 0.25', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k5 = "2020-01-01 01:00:00"', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k6 = 0.125', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = true', 'cardinality: 158')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = false', 'cardinality: 444')
+-- result:
+None
+-- !result
+-- Sort mode gives the same estimates for the frequent values.
+[UC] ANALYZE TABLE t1 UPDATE HISTOGRAM ON k1,k2,k3,k4,k5,k6,k7 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_collect_mode' = 'sort');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t1	histogram	status	OK
+-- !result
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sort%' AND Properties REGEXP 'histogram_collect_queries=14[,}]';
+-- result:
+1
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 1', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 5', 'cardinality: 24')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 10', 'cardinality: 12')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 <= 10', 'cardinality: 351')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-02"', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s1"', 'cardinality: 120')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = true', 'cardinality: 158')
+-- result:
+None
+-- !result
+-- The two modes side by side, on data and settings that leave neither of them a choice: five most common
+-- values, which no other value ties with, and few enough rows for the sketches to be exact.
+CREATE TABLE `t2` (
+    `k1` date,
+    `k2` int,
+    `k3` varchar(20),
+    `k4` decimal(10, 2)
+)
+PROPERTIES ('replication_num' = '1');
+-- result:
+-- !result
+INSERT INTO t2
+WITH series AS (
+    SELECT g1 FROM TABLE(generate_series(1, 60)) AS t(g1)
+)
+SELECT date_add('2020-01-01', s1.g1), s1.g1, concat('s', s1.g1), s1.g1 / 4
+FROM series s1, series s2
+WHERE s2.g1 <= 60 / s1.g1;
+-- result:
+-- !result
+SELECT count(*), count(DISTINCT k2) FROM t2;
+-- result:
+261	60
+-- !result
+[UC] ANALYZE FULL TABLE t2;
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	analyze	status	OK
+-- !result
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k1,k2,k3,k4 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k4') ORDER BY column_name;
+-- result:
+k2	[["6","6","10","10"],["7","7","18","8"],["8","8","25","7"],["9","9","31","6"],["10","10","37","6"],["11","11","42","5"],["12","12","47","5"],["13","13","51","4"],["14","14","55","4"],["15","15","59","4"],["16","16","62","3"],["17","17","65","3"],["18","18","68","3"],["19","19","71","3"],["20","20","74","3"],["21","21","76","2"],["22","22","78","2"],["23","23","80","2"],["24","24","82","2"],["25","25","84","2"],["26","26","86","2"],["27","27","88","2"],["28","28","90","2"],["29","29","92","2"],["30","30","94","2"],["31","31","95","1"],["32","32","96","1"],["33","33","97","1"],["34","34","98","1"],["35","35","99","1"],["36","36","100","1"],["37","37","101","1"],["38","38","102","1"],["39","39","103","1"],["40","40","104","1"],["41","41","105","1"],["42","42","106","1"],["43","43","107","1"],["44","44","108","1"],["45","45","109","1"],["46","46","110","1"],["47","47","111","1"],["48","48","112","1"],["49","49","113","1"],["50","50","114","1"],["51","51","115","1"],["52","52","116","1"],["53","53","117","1"],["54","54","118","1"],["55","55","119","1"],["56","56","120","1"],["57","57","121","1"],["58","58","122","1"],["59","59","123","1"],["60","60","124","1"]]
+k4	[["1.50","1.50","10","10"],["1.75","1.75","18","8"],["2.00","2.00","25","7"],["2.25","2.25","31","6"],["2.50","2.50","37","6"],["2.75","2.75","42","5"],["3.00","3.00","47","5"],["3.25","3.25","51","4"],["3.50","3.50","55","4"],["3.75","3.75","59","4"],["4.00","4.00","62","3"],["4.25","4.25","65","3"],["4.50","4.50","68","3"],["4.75","4.75","71","3"],["5.00","5.00","74","3"],["5.25","5.25","76","2"],["5.50","5.50","78","2"],["5.75","5.75","80","2"],["6.00","6.00","82","2"],["6.25","6.25","84","2"],["6.50","6.50","86","2"],["6.75","6.75","88","2"],["7.00","7.00","90","2"],["7.25","7.25","92","2"],["7.50","7.50","94","2"],["7.75","7.75","95","1"],["8.00","8.00","96","1"],["8.25","8.25","97","1"],["8.50","8.50","98","1"],["8.75","8.75","99","1"],["9.00","9.00","100","1"],["9.25","9.25","101","1"],["9.50","9.50","102","1"],["9.75","9.75","103","1"],["10.00","10.00","104","1"],["10.25","10.25","105","1"],["10.50","10.50","106","1"],["10.75","10.75","107","1"],["11.00","11.00","108","1"],["11.25","11.25","109","1"],["11.50","11.50","110","1"],["11.75","11.75","111","1"],["12.00","12.00","112","1"],["12.25","12.25","113","1"],["12.50","12.50","114","1"],["12.75","12.75","115","1"],["13.00","13.00","116","1"],["13.25","13.25","117","1"],["13.50","13.50","118","1"],["13.75","13.75","119","1"],["14.00","14.00","120","1"],["14.25","14.25","121","1"],["14.50","14.50","122","1"],["14.75","14.75","123","1"],["15.00","15.00","124","1"]]
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 3', 'cardinality: 20')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 6', 'cardinality: 10')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 20', 'cardinality: 3')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 <= 12', 'cardinality: 184')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k1 <= "2020-01-13"', 'cardinality: 184')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k4 < 5', 'cardinality: 208')
+-- result:
+None
+-- !result
+-- Sketch mode finds the same most common values, and lists them most frequent first. Its buckets are cut at
+-- equal heights, so the values held by a single row share buckets instead of getting one each.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k1,k2,k3,k4 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' ORDER BY column_name;
+-- result:
+k1	[["2020-01-02","60"],["2020-01-03","30"],["2020-01-04","20"],["2020-01-05","15"],["2020-01-06","12"]]
+k2	[["1","60"],["2","30"],["3","20"],["4","15"],["5","12"]]
+k3	[["s1","60"],["s2","30"],["s3","20"],["s4","15"],["s5","12"]]
+k4	[["0.25","60"],["0.50","30"],["0.75","20"],["1.00","15"],["1.25","12"]]
+-- !result
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k3', 'k4') ORDER BY column_name;
+-- result:
+k2	[["6","6","10","10"],["7","7","18","8"],["8","8","25","7"],["9","9","31","6"],["10","10","37","6"],["11","11","42","5"],["12","12","47","5"],["13","13","51","4"],["14","14","55","4"],["15","15","59","4"],["16","16","62","3"],["17","17","65","3"],["18","18","68","3"],["19","19","71","3"],["20","20","74","3"],["21","21","76","2"],["22","22","78","2"],["23","23","80","2"],["24","24","82","2"],["25","25","84","2"],["26","26","86","2"],["27","27","88","2"],["28","28","90","2"],["29","29","92","2"],["30","30","94","2"],["31","31","95","1"],["32","33","97","1"],["34","35","99","1"],["36","37","101","1"],["38","39","103","1"],["40","41","105","1"],["42","43","107","1"],["44","45","109","1"],["46","47","111","1"],["48","49","113","1"],["50","51","115","1"],["52","53","117","1"],["54","55","119","1"],["56","57","121","1"],["58","59","123","1"],["60","60","124","1"]]
+k3	[["Infinity","Infinity","124","0"]]
+k4	[["1.50","1.50","10","10"],["1.50","1.75","18","5"],["1.75","2.00","25","5"],["2.00","2.25","31","4"],["2.25","2.50","37","4"],["2.50","2.75","42","3"],["2.75","3.00","47","3"],["3.00","3.25","51","3"],["3.25","3.50","55","3"],["3.50","3.75","59","3"],["3.75","4.00","62","2"],["4.00","4.25","65","2"],["4.25","4.50","68","2"],["4.50","4.75","71","2"],["4.75","5.00","74","2"],["5.00","5.25","76","1"],["5.25","5.50","78","1"],["5.50","5.75","80","1"],["5.75","6.00","82","1"],["6.00","6.25","84","1"],["6.25","6.50","86","1"],["6.50","6.75","88","1"],["6.75","7.00","90","1"],["7.00","7.25","92","1"],["7.25","7.50","94","1"],["7.50","7.75","95","1"],["7.75","8.25","97","1"],["8.25","8.75","99","1"],["8.75","9.25","101","1"],["9.25","9.75","103","1"],["9.75","10.25","105","1"],["10.25","10.75","107","1"],["10.75","11.25","109","1"],["11.25","11.75","111","1"],["11.75","12.25","113","1"],["12.25","12.75","115","1"],["12.75","13.25","117","1"],["13.25","13.75","119","1"],["13.75","14.25","121","1"],["14.25","14.75","123","1"],["14.75","15.00","124","1"]]
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 3', 'cardinality: 20')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 6', 'cardinality: 10')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 20', 'cardinality: 3')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 <= 12', 'cardinality: 184')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k1 <= "2020-01-13"', 'cardinality: 184')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k4 < 5', 'cardinality: 209')
+-- result:
+None
+-- !result
+-- The distinct values of each bucket, counted with a HyperLogLog per bucket, in each mode.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort', 'histogram_collect_bucket_ndv_mode' = 'hll');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+-- result:
+[["6","6","10","10","1"],["7","7","18","8","1"],["8","8","25","7","1"],["9","9","31","6","1"],["10","10","37","6","1"],["11","11","42","5","1"],["12","12","47","5","1"],["13","13","51","4","1"],["14","14","55","4","1"],["15","15","59","4","1"],["16","16","62","3","1"],["17","17","65","3","1"],["18","18","68","3","1"],["19","19","71","3","1"],["20","20","74","3","1"],["21","21","76","2","1"],["22","22","78","2","1"],["23","23","80","2","1"],["24","24","82","2","1"],["25","25","84","2","1"],["26","26","86","2","1"],["27","27","88","2","1"],["28","28","90","2","1"],["29","29","92","2","1"],["30","30","94","2","1"],["31","31","95","1","1"],["32","32","96","1","1"],["33","33","97","1","1"],["34","34","98","1","1"],["35","35","99","1","1"],["36","36","100","1","1"],["37","37","101","1","1"],["38","38","102","1","1"],["39","39","103","1","1"],["40","40","104","1","1"],["41","41","105","1","1"],["42","42","106","1","1"],["43","43","107","1","1"],["44","44","108","1","1"],["45","45","109","1","1"],["46","46","110","1","1"],["47","47","111","1","1"],["48","48","112","1","1"],["49","49","113","1","1"],["50","50","114","1","1"],["51","51","115","1","1"],["52","52","116","1","1"],["53","53","117","1","1"],["54","54","118","1","1"],["55","55","119","1","1"],["56","56","120","1","1"],["57","57","121","1","1"],["58","58","122","1","1"],["59","59","123","1","1"],["60","60","124","1","1"]]
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+-- result:
+None
+-- !result
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'hll');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+-- result:
+[["6","6","10","10","1"],["7","7","18","8","1"],["8","8","25","7","1"],["9","9","31","6","1"],["10","10","37","6","1"],["11","11","42","5","1"],["12","12","47","5","1"],["13","13","51","4","1"],["14","14","55","4","1"],["15","15","59","4","1"],["16","16","62","3","1"],["17","17","65","3","1"],["18","18","68","3","1"],["19","19","71","3","1"],["20","20","74","3","1"],["21","21","76","2","1"],["22","22","78","2","1"],["23","23","80","2","1"],["24","24","82","2","1"],["25","25","84","2","1"],["26","26","86","2","1"],["27","27","88","2","1"],["28","28","90","2","1"],["29","29","92","2","1"],["30","30","94","2","1"],["31","31","95","1","1"],["32","33","97","1","2"],["34","35","99","1","2"],["36","37","101","1","2"],["38","39","103","1","2"],["40","41","105","1","2"],["42","43","107","1","2"],["44","45","109","1","2"],["46","47","111","1","2"],["48","49","113","1","2"],["50","51","115","1","2"],["52","53","117","1","2"],["54","55","119","1","2"],["56","57","121","1","2"],["58","59","123","1","2"],["60","60","124","1","1"]]
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+-- result:
+None
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+-- result:
+None
+-- !result
+-- And estimated from the rows that were read. Sketch mode counts those with HyperLogLogs as well.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort', 'histogram_collect_bucket_ndv_mode' = 'sample');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+-- result:
+[["6","6","10","10","1"],["7","7","18","8","1"],["8","8","25","7","1"],["9","9","31","6","1"],["10","10","37","6","1"],["11","11","42","5","1"],["12","12","47","5","1"],["13","13","51","4","1"],["14","14","55","4","1"],["15","15","59","4","1"],["16","16","62","3","1"],["17","17","65","3","1"],["18","18","68","3","1"],["19","19","71","3","1"],["20","20","74","3","1"],["21","21","76","2","1"],["22","22","78","2","1"],["23","23","80","2","1"],["24","24","82","2","1"],["25","25","84","2","1"],["26","26","86","2","1"],["27","27","88","2","1"],["28","28","90","2","1"],["29","29","92","2","1"],["30","30","94","2","1"],["31","31","95","1","1"],["32","32","96","1","1"],["33","33","97","1","1"],["34","34","98","1","1"],["35","35","99","1","1"],["36","36","100","1","1"],["37","37","101","1","1"],["38","38","102","1","1"],["39","39","103","1","1"],["40","40","104","1","1"],["41","41","105","1","1"],["42","42","106","1","1"],["43","43","107","1","1"],["44","44","108","1","1"],["45","45","109","1","1"],["46","46","110","1","1"],["47","47","111","1","1"],["48","48","112","1","1"],["49","49","113","1","1"],["50","50","114","1","1"],["51","51","115","1","1"],["52","52","116","1","1"],["53","53","117","1","1"],["54","54","118","1","1"],["55","55","119","1","1"],["56","56","120","1","1"],["57","57","121","1","1"],["58","58","122","1","1"],["59","59","123","1","1"],["60","60","124","1","1"]]
+-- !result
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'sample');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+-- result:
+[["6","6","10","10","1"],["7","7","18","8","1"],["8","8","25","7","1"],["9","9","31","6","1"],["10","10","37","6","1"],["11","11","42","5","1"],["12","12","47","5","1"],["13","13","51","4","1"],["14","14","55","4","1"],["15","15","59","4","1"],["16","16","62","3","1"],["17","17","65","3","1"],["18","18","68","3","1"],["19","19","71","3","1"],["20","20","74","3","1"],["21","21","76","2","1"],["22","22","78","2","1"],["23","23","80","2","1"],["24","24","82","2","1"],["25","25","84","2","1"],["26","26","86","2","1"],["27","27","88","2","1"],["28","28","90","2","1"],["29","29","92","2","1"],["30","30","94","2","1"],["31","31","95","1","1"],["32","33","97","1","2"],["34","35","99","1","2"],["36","37","101","1","2"],["38","39","103","1","2"],["40","41","105","1","2"],["42","43","107","1","2"],["44","45","109","1","2"],["46","47","111","1","2"],["48","49","113","1","2"],["50","51","115","1","2"],["52","53","117","1","2"],["54","55","119","1","2"],["56","57","121","1","2"],["58","59","123","1","2"],["60","60","124","1","1"]]
+-- !result
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+-- result:
+None
+-- !result
+-- FULL reads every row and needs sketch mode. SAMPLE and no keyword sample, as before.
+ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2;
+-- result:
+E: (1064, "Getting analyzing error. Detail message: Collecting a histogram from every row needs histogram_collect_mode 'sketch': sort mode would send every row through one thread.")
+-- !result
+ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_collect_mode' = 'sort');
+-- result:
+E: (1064, "Getting analyzing error. Detail message: Collecting a histogram from every row needs histogram_collect_mode 'sketch': sort mode would send every row through one thread.")
+-- !result
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_collect_mode' = 'kll');
+-- result:
+E: (1064, "Getting analyzing error. Detail message: Property 'histogram_collect_mode' value must be 'sort' or 'sketch'.")
+-- !result
+[UC] ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2, k3 PROPERTIES('histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_sample_ratio' = '0.5');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k3') ORDER BY column_name;
+-- result:
+k2	[["1","60"],["2","30"],["3","20"],["4","15"],["5","12"]]
+k3	[["s1","60"],["s2","30"],["s3","20"],["s4","15"],["s5","12"]]
+-- !result
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_full_scan=true%' AND Properties REGEXP 'histogram_sample_ratio=1[,}]';
+-- result:
+1
+-- !result
+[UC] ANALYZE SAMPLE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t2	histogram	status	OK
+-- !result
+SELECT get_json_string(mcv, '$[0][0]'), get_json_string(mcv, '$[4][0]') FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+-- result:
+1	5
+-- !result
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_sample_ratio=0.1[,}]' AND Properties NOT LIKE '%histogram_full_scan%';
+-- result:
+1
+-- !result
+-- Enough rows for the sketches to have to approximate, spread over several tablets so that partial sketches
+-- are merged. Half of the rows of k_skew hold one of two values; k_uni is unique.
+CREATE TABLE `t3` (
+    `id` bigint,
+    `k_skew` int,
+    `k_uni` bigint,
+    `k_str` varchar(20)
+)
+DISTRIBUTED BY HASH(`id`) BUCKETS 4
+PROPERTIES ('replication_num' = '1');
+-- result:
+-- !result
+INSERT INTO t3
+SELECT generate_series,
+       CASE WHEN generate_series % 10 < 4 THEN 7 WHEN generate_series % 10 = 4 THEN 13 ELSE 100 + generate_series % 5000 END,
+       (generate_series * 7919) % 200000,
+       concat('v', CASE WHEN generate_series % 5 = 0 THEN 0 ELSE generate_series % 3000 END)
+FROM TABLE(generate_series(1, 200000));
+-- result:
+-- !result
+[UC] ANALYZE FULL TABLE t3;
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t3	analyze	status	OK
+-- !result
+[UC] ANALYZE FULL TABLE t3 UPDATE HISTOGRAM ON k_skew, k_uni, k_str PROPERTIES('histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'hll');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t3	histogram	status	OK
+-- !result
+-- The most common values of a column that gets buckets are counted exactly.
+SELECT mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew';
+-- result:
+[["7","80000"],["13","20000"]]
+-- !result
+-- Those of a string column come from the sketch alone: 40000 rows hold v0, give or take the sketch's error.
+SELECT get_json_string(mcv, '$[0][0]'), abs(cast(get_json_string(mcv, '$[0][1]') AS bigint) - 40000) <= 200000 * 3.5 / 2048, json_length(parse_json(mcv))
+FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_str';
+-- result:
+v0	1	1
+-- !result
+-- k_uni holds each of 0 to 199999 once, so the rows at or below a bound are the bound plus one. Every bucket's
+-- cumulative count is within 2% of the rows of that, about three times the sketch's rank error, and its
+-- distinct count within a fifth of its rows.
+WITH h AS (
+    SELECT parse_json(buckets) AS j FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_uni'
+), b AS (
+    SELECT cast(get_json_string(e.value, '$[1]') AS bigint) AS upper, cast(get_json_string(e.value, '$[2]') AS bigint) AS cnt,
+           cast(get_json_string(e.value, '$[4]') AS bigint) AS ndv
+    FROM h, json_each(h.j) AS e
+)
+SELECT count(*), max(cnt), max(abs(cnt - (upper + 1))) < 4000, min(ndv) > 2000, max(ndv) < 4500 FROM b;
+-- result:
+64	200000	1	1	1
+-- !result
+-- The buckets of k_skew cover the 100000 rows outside its two most common values, which hold 2500 values.
+WITH h AS (
+    SELECT parse_json(buckets) AS j FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew'
+), b AS (
+    SELECT cast(get_json_string(e.value, '$[2]') AS bigint) AS cnt, cast(get_json_string(e.value, '$[4]') AS bigint) AS ndv
+    FROM h, json_each(h.j) AS e
+)
+SELECT count(*) BETWEEN 60 AND 64, max(cnt), sum(ndv) BETWEEN 2300 AND 2700 FROM b;
+-- result:
+1	100000	1
+-- !result
+-- Half of the rows, in sampled blocks. The counts are scaled back up to the table.
+[UC] ANALYZE SAMPLE TABLE t3 UPDATE HISTOGRAM ON k_skew PROPERTIES('histogram_collect_mode' = 'sketch', 'histogram_sample_ratio' = '0.5');
+-- result:
+analyze_test_ce1cd3ba2f69481d9eeef26ddb8dd597.t3	histogram	status	OK
+-- !result
+SELECT get_json_string(mcv, '$[0][0]'), cast(get_json_string(mcv, '$[0][1]') AS bigint) BETWEEN 48000 AND 112000,
+       get_json_string(mcv, '$[1][0]'), cast(get_json_string(mcv, '$[1][1]') AS bigint) BETWEEN 12000 AND 28000
+FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew';
+-- result:
+7	1	13	1
+-- !result
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_sample_ratio=0.5[,}]';
+-- result:
+1
+-- !result
+drop database analyze_test_${uuid0};
+-- result:
+-- !result

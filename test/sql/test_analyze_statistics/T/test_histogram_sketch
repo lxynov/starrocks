@@ -1,0 +1,199 @@
+-- name: test_histogram_sketch
+
+create database analyze_test_${uuid0};
+use analyze_test_${uuid0};
+
+CREATE TABLE `t1` (
+    `k1` date,
+    `k2` int,
+    `k3` varchar(20),
+    `k4` decimal(10, 2),
+    `k5` datetime,
+    `k6` double,
+    `k7` boolean
+)
+PROPERTIES ('replication_num' = '1');
+
+-- Skewed: the value i of k2 is held by 120 / i rows, rounded down, and the other columns follow k2.
+INSERT INTO t1
+WITH series AS (
+    SELECT g1 FROM TABLE(generate_series(1, 120)) AS t(g1)
+)
+SELECT date_add('2020-01-01', s1.g1), s1.g1, concat('s', s1.g1), s1.g1 / 4,
+       date_add('2020-01-01 00:00:00', interval s1.g1 hour), s1.g1 / 8, s1.g1 % 3 = 0
+FROM series s1, series s2
+WHERE s2.g1 <= 120 / s1.g1;
+INSERT INTO t1 VALUES (NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+SELECT count(*), count(k2), count(DISTINCT k2) FROM t1;
+SELECT k2, count(*) FROM t1 GROUP BY k2 ORDER BY count(*) DESC, k2 LIMIT 12;
+
+[UC] ANALYZE FULL TABLE t1;
+
+-- Sketch mode. A value is a most common value only if it is held by at least twice the rows an evenly spread
+-- column would give it: 602 rows over 120 values is 5 rows a value, so the values 1 to 10 qualify. Every
+-- other row goes to the buckets. With no more rows than the sketches keep exactly, the result is exact.
+[UC] ANALYZE TABLE t1 UPDATE HISTOGRAM ON k1,k2,k3,k4,k5,k6,k7 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_collect_mode' = 'sketch');
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t1' ORDER BY column_name;
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t1' AND column_name IN ('k2', 'k3', 'k4', 'k7') ORDER BY column_name;
+-- One query finds the most common values of the six fixed-size columns, one those of the string column, and
+-- one builds the buckets: three queries instead of two per column.
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_collect_queries=3[,}]' AND Properties LIKE '%histogram_collect_elapsed_ms=%';
+
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 1', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 5', 'cardinality: 24')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 10', 'cardinality: 12')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 11', 'cardinality: 10')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 12', 'cardinality: 10')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 40', 'cardinality: 3')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 <= 10', 'cardinality: 351')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 BETWEEN 20 AND 30', 'cardinality: 50')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-02"', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-12"', 'cardinality: 10')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 <= "2020-01-21"', 'cardinality: 428')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s1"', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s50"', 'cardinality: 2')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k4 = 0.25', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k5 = "2020-01-01 01:00:00"', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k6 = 0.125', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = true', 'cardinality: 158')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = false', 'cardinality: 444')
+
+-- Sort mode gives the same estimates for the frequent values.
+[UC] ANALYZE TABLE t1 UPDATE HISTOGRAM ON k1,k2,k3,k4,k5,k6,k7 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_collect_mode' = 'sort');
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sort%' AND Properties REGEXP 'histogram_collect_queries=14[,}]';
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 1', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 5', 'cardinality: 24')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 = 10', 'cardinality: 12')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k2 <= 10', 'cardinality: 351')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k1 = "2020-01-02"', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k3 = "s1"', 'cardinality: 120')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t1 WHERE k7 = true', 'cardinality: 158')
+
+-- The two modes side by side, on data and settings that leave neither of them a choice: five most common
+-- values, which no other value ties with, and few enough rows for the sketches to be exact.
+CREATE TABLE `t2` (
+    `k1` date,
+    `k2` int,
+    `k3` varchar(20),
+    `k4` decimal(10, 2)
+)
+PROPERTIES ('replication_num' = '1');
+
+INSERT INTO t2
+WITH series AS (
+    SELECT g1 FROM TABLE(generate_series(1, 60)) AS t(g1)
+)
+SELECT date_add('2020-01-01', s1.g1), s1.g1, concat('s', s1.g1), s1.g1 / 4
+FROM series s1, series s2
+WHERE s2.g1 <= 60 / s1.g1;
+
+SELECT count(*), count(DISTINCT k2) FROM t2;
+[UC] ANALYZE FULL TABLE t2;
+
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k1,k2,k3,k4 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort');
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k4') ORDER BY column_name;
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 3', 'cardinality: 20')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 6', 'cardinality: 10')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 20', 'cardinality: 3')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 <= 12', 'cardinality: 184')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k1 <= "2020-01-13"', 'cardinality: 184')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k4 < 5', 'cardinality: 208')
+
+-- Sketch mode finds the same most common values, and lists them most frequent first. Its buckets are cut at
+-- equal heights, so the values held by a single row share buckets instead of getting one each.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k1,k2,k3,k4 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch');
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' ORDER BY column_name;
+SELECT column_name, buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k3', 'k4') ORDER BY column_name;
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 3', 'cardinality: 20')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 6', 'cardinality: 10')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 20', 'cardinality: 3')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 <= 12', 'cardinality: 184')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k1 <= "2020-01-13"', 'cardinality: 184')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k4 < 5', 'cardinality: 209')
+
+-- The distinct values of each bucket, counted with a HyperLogLog per bucket, in each mode.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort', 'histogram_collect_bucket_ndv_mode' = 'hll');
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'hll');
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 > 30', 'cardinality: 30')
+
+-- And estimated from the rows that were read. Sketch mode counts those with HyperLogLogs as well.
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sort', 'histogram_collect_bucket_ndv_mode' = 'sample');
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+[UC] ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_sample_ratio' = '1.0', 'histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'sample');
+SELECT buckets FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+function: assert_explain_verbose_contains('SELECT COUNT(*) FROM t2 WHERE k2 = 45', 'cardinality: 4')
+
+-- FULL reads every row and needs sketch mode. SAMPLE and no keyword sample, as before.
+ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2;
+ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_collect_mode' = 'sort');
+ANALYZE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_collect_mode' = 'kll');
+[UC] ANALYZE FULL TABLE t2 UPDATE HISTOGRAM ON k2, k3 PROPERTIES('histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch', 'histogram_sample_ratio' = '0.5');
+SELECT column_name, mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name IN ('k2', 'k3') ORDER BY column_name;
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_full_scan=true%' AND Properties REGEXP 'histogram_sample_ratio=1[,}]';
+[UC] ANALYZE SAMPLE TABLE t2 UPDATE HISTOGRAM ON k2 PROPERTIES('histogram_mcv_size' = '5', 'histogram_collect_mode' = 'sketch');
+SELECT get_json_string(mcv, '$[0][0]'), get_json_string(mcv, '$[4][0]') FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t2' AND column_name = 'k2';
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_sample_ratio=0.1[,}]' AND Properties NOT LIKE '%histogram_full_scan%';
+
+-- Enough rows for the sketches to have to approximate, spread over several tablets so that partial sketches
+-- are merged. Half of the rows of k_skew hold one of two values; k_uni is unique.
+CREATE TABLE `t3` (
+    `id` bigint,
+    `k_skew` int,
+    `k_uni` bigint,
+    `k_str` varchar(20)
+)
+DISTRIBUTED BY HASH(`id`) BUCKETS 4
+PROPERTIES ('replication_num' = '1');
+
+INSERT INTO t3
+SELECT generate_series,
+       CASE WHEN generate_series % 10 < 4 THEN 7 WHEN generate_series % 10 = 4 THEN 13 ELSE 100 + generate_series % 5000 END,
+       (generate_series * 7919) % 200000,
+       concat('v', CASE WHEN generate_series % 5 = 0 THEN 0 ELSE generate_series % 3000 END)
+FROM TABLE(generate_series(1, 200000));
+[UC] ANALYZE FULL TABLE t3;
+[UC] ANALYZE FULL TABLE t3 UPDATE HISTOGRAM ON k_skew, k_uni, k_str PROPERTIES('histogram_collect_mode' = 'sketch', 'histogram_collect_bucket_ndv_mode' = 'hll');
+
+-- The most common values of a column that gets buckets are counted exactly.
+SELECT mcv FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew';
+-- Those of a string column come from the sketch alone: 40000 rows hold v0, give or take the sketch's error.
+SELECT get_json_string(mcv, '$[0][0]'), abs(cast(get_json_string(mcv, '$[0][1]') AS bigint) - 40000) <= 200000 * 3.5 / 2048, json_length(parse_json(mcv))
+FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_str';
+-- k_uni holds each of 0 to 199999 once, so the rows at or below a bound are the bound plus one. Every bucket's
+-- cumulative count is within 2% of the rows of that, about three times the sketch's rank error, and its
+-- distinct count within a fifth of its rows.
+WITH h AS (
+    SELECT parse_json(buckets) AS j FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_uni'
+), b AS (
+    SELECT cast(get_json_string(e.value, '$[1]') AS bigint) AS upper, cast(get_json_string(e.value, '$[2]') AS bigint) AS cnt,
+           cast(get_json_string(e.value, '$[4]') AS bigint) AS ndv
+    FROM h, json_each(h.j) AS e
+)
+SELECT count(*), max(cnt), max(abs(cnt - (upper + 1))) < 4000, min(ndv) > 2000, max(ndv) < 4500 FROM b;
+-- The buckets of k_skew cover the 100000 rows outside its two most common values, which hold 2500 values.
+WITH h AS (
+    SELECT parse_json(buckets) AS j FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew'
+), b AS (
+    SELECT cast(get_json_string(e.value, '$[2]') AS bigint) AS cnt, cast(get_json_string(e.value, '$[4]') AS bigint) AS ndv
+    FROM h, json_each(h.j) AS e
+)
+SELECT count(*) BETWEEN 60 AND 64, max(cnt), sum(ndv) BETWEEN 2300 AND 2700 FROM b;
+
+-- Half of the rows, in sampled blocks. The counts are scaled back up to the table.
+[UC] ANALYZE SAMPLE TABLE t3 UPDATE HISTOGRAM ON k_skew PROPERTIES('histogram_collect_mode' = 'sketch', 'histogram_sample_ratio' = '0.5');
+SELECT get_json_string(mcv, '$[0][0]'), cast(get_json_string(mcv, '$[0][1]') AS bigint) BETWEEN 48000 AND 112000,
+       get_json_string(mcv, '$[1][0]'), cast(get_json_string(mcv, '$[1][1]') AS bigint) BETWEEN 12000 AND 28000
+FROM _statistics_.histogram_statistics WHERE table_name = 'analyze_test_${uuid0}.t3' AND column_name = 'k_skew';
+SELECT count(*) FROM information_schema.analyze_status WHERE `Database` LIKE '%analyze_test_${uuid0}' AND `Type` = 'HISTOGRAM' AND Properties LIKE '%histogram_collect_mode=sketch%' AND Properties REGEXP 'histogram_sample_ratio=0.5[,}]';
+
+drop database analyze_test_${uuid0};

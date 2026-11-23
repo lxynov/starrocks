@@ -62,6 +62,16 @@ struct DsKllBuilder {
     }
 };
 
+struct DsFrequentBuilder {
+    template <LogicalType lt>
+    void operator()(AggregateFuncResolver* resolver) {
+        if constexpr (ds_frequent_supports<lt>) {
+            resolver->add_aggregate_mapping<lt, TYPE_VARBINARY, DsSketchState<DsFrequentFamily::TypedSketch<lt>>>(
+                    "ds_frequent", kWithoutWindow, AggregateFactory::MakeDsFrequentAggregateFunction<lt>());
+        }
+    }
+};
+
 struct ApproxTopKBuilder {
     template <LogicalType lt>
     void operator()(AggregateFuncResolver* resolver) {
@@ -84,6 +94,7 @@ void AggregateFuncResolver::register_approx() {
     for (auto type : aggregate_types()) {
         type_dispatch_all(type, ApproxTopKBuilder(), this);
         type_dispatch_all(type, DsKllBuilder(), this);
+        type_dispatch_all(type, DsFrequentBuilder(), this);
     }
     add_aggregate_mapping<TYPE_HLL, TYPE_HLL, HyperLogLog>("hll_union", kWithoutWindow,
                                                            AggregateFactory::MakeHllUnionAggregateFunction());
@@ -100,6 +111,9 @@ void AggregateFuncResolver::register_approx() {
 
     add_aggregate_mapping<TYPE_VARBINARY, TYPE_VARBINARY, DsSketchState<DsKllSketch>>(
             "ds_kll_union", kWithoutWindow, AggregateFactory::MakeDsKllUnionAggregateFunction());
+
+    add_aggregate_mapping<TYPE_VARBINARY, TYPE_VARBINARY, DsSketchState<DsFrequentSketch>>(
+            "ds_frequent_union", kWithoutWindow, AggregateFactory::MakeDsFrequentUnionAggregateFunction());
 }
 
 } // namespace starrocks

@@ -21,6 +21,7 @@
 #include "column/column_builder.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
+#include "exprs/agg/data_sketch/ds_frequent.h"
 #include "exprs/agg/data_sketch/ds_kll.h"
 
 namespace starrocks {
@@ -47,6 +48,34 @@ StatusOr<ColumnPtr> DsSketchFunctions::ds_kll_histogram(FunctionContext* context
         Status status = sketch_or.value()->histogram_json(num_buckets_viewer.value(row), &json);
         if (!status.ok()) {
             return Status::InvalidArgument(fmt::format("ds_kll_histogram: {}", status.message()));
+        }
+        builder.append(Slice(json));
+    }
+    return builder.build(ColumnHelper::is_all_const(columns));
+}
+
+StatusOr<ColumnPtr> DsSketchFunctions::ds_frequent_items(FunctionContext* context, const Columns& columns) {
+    ColumnViewer<TYPE_VARBINARY> sketch_viewer(columns[0]);
+    ColumnViewer<TYPE_INT> max_items_viewer(columns[1]);
+    const size_t size = columns[0]->size();
+    ColumnBuilder<TYPE_VARCHAR> builder(size);
+
+    std::string json;
+    for (size_t row = 0; row < size; ++row) {
+        // Zero bytes is what ds_frequent returns in place of a sketch when it saw no value and cannot return NULL.
+        if (sketch_viewer.is_null(row) || max_items_viewer.is_null(row) || sketch_viewer.value(row).size == 0) {
+            builder.append_null();
+            continue;
+        }
+        int64_t memory_usage = 0;
+        auto sketch_or = DsFrequentSketch::deserialize(sketch_viewer.value(row), &memory_usage);
+        if (!sketch_or.ok()) {
+            return Status::InvalidArgument(fmt::format("ds_frequent_items: {}", sketch_or.status().message()));
+        }
+        json.clear();
+        Status status = sketch_or.value()->items_json(max_items_viewer.value(row), &json);
+        if (!status.ok()) {
+            return Status::InvalidArgument(fmt::format("ds_frequent_items: {}", status.message()));
         }
         builder.append(Slice(json));
     }

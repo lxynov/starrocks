@@ -22,6 +22,7 @@
 #include "column/runtime_type_traits.h"
 #include "column/vectorized_fwd.h"
 #include "exprs/agg/aggregate.h"
+#include "exprs/agg/data_sketch/ds_frequent.h"
 #include "exprs/agg/data_sketch/ds_kll.h"
 #include "gutil/casts.h"
 
@@ -47,6 +48,15 @@ struct DsKllFamily {
     using Sketch = DsKllSketch;
     template <LogicalType LT>
     using TypedSketch = DsKllSketchImpl<LT>;
+};
+
+struct DsFrequentFamily {
+    static constexpr const char* BUILD_NAME = "ds_frequent";
+    static constexpr const char* UNION_NAME = "ds_frequent_union";
+    using Sketch = DsFrequentSketch;
+    // CHAR and VARCHAR values are the same bytes and share one sketch type.
+    template <LogicalType LT>
+    using TypedSketch = DsFrequentSketchImpl<LT == TYPE_CHAR ? TYPE_VARCHAR : LT>;
 };
 
 template <typename SketchType>

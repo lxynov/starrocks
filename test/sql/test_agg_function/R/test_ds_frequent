@@ -1,0 +1,183 @@
+-- name: test_ds_frequent
+CREATE TABLE t1 (
+  id BIGINT NOT NULL,
+  c_int INT,
+  c_str VARCHAR(32),
+  c_char CHAR(4),
+  c_decimal DECIMAL(10, 2),
+  c_date DATE,
+  c_datetime DATETIME,
+  c_double DOUBLE,
+  c_bool BOOLEAN
+)
+DUPLICATE KEY(id)
+DISTRIBUTED BY HASH(id) BUCKETS 4;
+-- result:
+-- !result
+-- The value i occurs 2 * i times, for i from 1 to 10.
+insert into t1
+select s.generate_series * 100 + r.generate_series, s.generate_series, concat('v-', s.generate_series),
+       concat('c', s.generate_series), s.generate_series / 4,
+       date_add('2024-01-01', interval s.generate_series day),
+       date_add('2024-01-01 00:00:00', interval s.generate_series hour),
+       s.generate_series / 8, s.generate_series > 3
+from table(generate_series(1, 10)) s, table(generate_series(1, 20)) r
+where r.generate_series <= 2 * s.generate_series;
+-- result:
+-- !result
+insert into t1 values (0, null, null, null, null, null, null, null, null);
+-- result:
+-- !result
+-- With few distinct values the counts are exact: max_error is 0 and every estimate equals both bounds.
+select ds_frequent_items(ds_frequent(c_int), 3) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["10",20,20,20],["9",18,18,18],["8",16,16,16]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_str), 3) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["v-10",20,20,20],["v-9",18,18,18],["v-8",16,16,16]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_char), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["c10",20,20,20],["c9",18,18,18]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_decimal), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["2.50",20,20,20],["2.25",18,18,18]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_date), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["2024-01-11",20,20,20],["2024-01-10",18,18,18]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_datetime), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["2024-01-01 10:00:00",20,20,20],["2024-01-01 09:00:00",18,18,18]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_double), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["1.25",20,20,20],["1.125",18,18,18]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_bool), 2) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["1",98,98,98],["0",12,12,12]]}
+-- !result
+-- All of them, and none of them.
+select ds_frequent_items(ds_frequent(c_int), 100) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["10",20,20,20],["9",18,18,18],["8",16,16,16],["7",14,14,14],["6",12,12,12],["5",10,10,10],["4",8,8,8],["3",6,6,6],["2",4,4,4],["1",2,2,2]]}
+-- !result
+select ds_frequent_items(ds_frequent(c_int), 0) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[]}
+-- !result
+-- A group without a non-NULL value has no sketch.
+select ds_frequent(c_int) is null, ds_frequent_items(ds_frequent(c_int), 3) from t1 where id = 0;
+-- result:
+1	None
+-- !result
+select ds_frequent(c_str) is null, ds_frequent_items(ds_frequent(c_str), 3) from t1 where id < 0;
+-- result:
+1	None
+-- !result
+-- The result does not depend on how many stages the aggregation is split into.
+set new_planner_agg_stage = 1;
+-- result:
+-- !result
+select ds_frequent_items(ds_frequent(c_str), 3) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["v-10",20,20,20],["v-9",18,18,18],["v-8",16,16,16]]}
+-- !result
+set new_planner_agg_stage = 2;
+-- result:
+-- !result
+select ds_frequent_items(ds_frequent(c_str), 3) from t1;
+-- result:
+{"total":110,"max_error":0,"items":[["v-10",20,20,20],["v-9",18,18,18],["v-8",16,16,16]]}
+-- !result
+select id % 2 as g, ds_frequent_items(ds_frequent(c_int), 2) from t1 group by id % 2 order by g;
+-- result:
+0	{"total":55,"max_error":0,"items":[["10",10,10,10],["9",9,9,9]]}
+1	{"total":55,"max_error":0,"items":[["10",10,10,10],["9",9,9,9]]}
+-- !result
+set new_planner_agg_stage = 0;
+-- result:
+-- !result
+set streaming_preaggregation_mode = 'force_streaming';
+-- result:
+-- !result
+select id % 2 as g, ds_frequent_items(ds_frequent(c_int), 2) from t1 group by id % 2 order by g;
+-- result:
+0	{"total":55,"max_error":0,"items":[["10",10,10,10],["9",9,9,9]]}
+1	{"total":55,"max_error":0,"items":[["10",10,10,10],["9",9,9,9]]}
+-- !result
+set streaming_preaggregation_mode = 'auto';
+-- result:
+-- !result
+-- Values that need escaping survive the trip through JSON.
+select ds_frequent_items(ds_frequent(v), 5) from (
+    select 'say "hi"' as v union all select 'say "hi"' union all select 'back\\slash' union all select '') t;
+-- result:
+{"total":4,"max_error":0,"items":[["say \"hi\"",2,2,2],["",1,1,1],["back\\slash",1,1,1]]}
+-- !result
+-- ds_frequent_union merges sketches that were built separately.
+select ds_frequent_items(ds_frequent_union(s), 3) from (select id % 7 as g, ds_frequent(c_str) as s from t1 group by id % 7) t;
+-- result:
+{"total":110,"max_error":0,"items":[["v-10",20,20,20],["v-9",18,18,18],["v-8",16,16,16]]}
+-- !result
+-- A sketch can be stored and merged later.
+CREATE TABLE sketches (g INT, s VARBINARY) DUPLICATE KEY(g) DISTRIBUTED BY HASH(g) BUCKETS 1;
+-- result:
+-- !result
+insert into sketches select id % 5, ds_frequent(c_date) from t1 group by id % 5;
+-- result:
+-- !result
+select count(*), ds_frequent_items(ds_frequent_union(s), 2) from sketches;
+-- result:
+5	{"total":110,"max_error":0,"items":[["2024-01-11",20,20,20],["2024-01-10",18,18,18]]}
+-- !result
+-- Sketches of different value types do not merge.
+select ds_frequent_union(s) from (select ds_frequent(c_int) as s from t1 union all select ds_frequent(c_str) from t1) t;
+-- result:
+[REGEX].*ds_frequent_union: expected a frequent items sketch of (INT|VARCHAR) values, but got one of (INT|VARCHAR) values.*
+-- !result
+select ds_frequent_items(cast('not a sketch' as varbinary), 4);
+-- result:
+[REGEX].*ds_frequent_items: not a sketch of the expected kind.*
+-- !result
+select ds_frequent_items(ds_frequent(c_int), -1) from t1;
+-- result:
+[REGEX].*ds_frequent_items: the number of values must not be negative, but got -1.*
+-- !result
+-- A KLL sketch is not a frequent items sketch.
+select ds_frequent_items(ds_kll(c_int), 4) from t1;
+-- result:
+[REGEX].*ds_frequent_items: not a sketch of the expected kind.*
+-- !result
+-- With far more distinct values than the sketch tracks, the heavy values survive and the true count of each
+-- lies within its bounds. 5 is added 50000 times and 7 30000 times to 200000 values that occur once.
+CREATE TABLE t2 (id BIGINT NOT NULL, v BIGINT NOT NULL) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 4;
+-- result:
+-- !result
+insert into t2 select generate_series, generate_series + 1000 from table(generate_series(1, 200000));
+-- result:
+-- !result
+insert into t2 select generate_series, 5 from table(generate_series(1, 50000));
+-- result:
+-- !result
+insert into t2 select generate_series, 7 from table(generate_series(1, 30000));
+-- result:
+-- !result
+with f as (select ds_frequent_items(ds_frequent(v), 2) as j from t2)
+select get_json_int(j, '$.total'),
+       get_json_int(j, '$.max_error') > 0, get_json_int(j, '$.max_error') <= 280000 * 3.5 / 2048,
+       get_json_string(j, '$.items[0][0]'), get_json_int(j, '$.items[0][2]') <= 50000, get_json_int(j, '$.items[0][3]') >= 50000,
+       get_json_string(j, '$.items[1][0]'), get_json_int(j, '$.items[1][2]') <= 30000, get_json_int(j, '$.items[1][3]') >= 30000,
+       get_json_int(j, '$.items[0][3]') - get_json_int(j, '$.items[0][2]') = get_json_int(j, '$.max_error')
+from f;
+-- result:
+280000	1	1	5	1	1	7	1	1	1
+-- !result
+select length(ds_frequent(v)) < 65536 from t2;
+-- result:
+1
+-- !result

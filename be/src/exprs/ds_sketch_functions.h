@@ -18,13 +18,18 @@
 
 namespace starrocks {
 
-// Scalar functions that read a serialized sketch built by ds_kll or ds_kll_union and return what it knows as
-// JSON. The sketch carries the type of its values, so one signature serves every value type.
+// Scalar functions that read a serialized sketch, built by ds_kll, ds_frequent or their unions, and return what
+// it knows as JSON. The sketch carries the type of its values, so one signature serves every value type.
 class DsSketchFunctions {
 public:
     // ds_kll_histogram(sketch, n): the bounds and ranks of n equal-height buckets. See
     // DsKllSketch::histogram_json for the format. NULL if either argument is NULL or the sketch is zero bytes.
     DEFINE_VECTORIZED_FN(ds_kll_histogram);
+
+    // ds_frequent_items(sketch, n): up to n of the values the sketch tracks, most frequent first, with the
+    // bounds on how often each occurs. See DsFrequentSketch::items_json for the format. NULL if either
+    // argument is NULL or the sketch is zero bytes.
+    DEFINE_VECTORIZED_FN(ds_frequent_items);
 };
 
 } // namespace starrocks

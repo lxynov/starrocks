@@ -21,6 +21,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(EXPR_FILES
   agg/coverage_window.cpp
+  agg/data_sketch/ds_frequent.cpp
   agg/data_sketch/ds_hll.cpp
   agg/data_sketch/ds_kll.cpp
   agg/data_sketch/ds_sketch_utils.cpp

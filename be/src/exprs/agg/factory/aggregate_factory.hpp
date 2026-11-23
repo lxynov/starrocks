@@ -211,6 +211,11 @@ public:
     static AggregateFunctionPtr MakeDsKllUnionAggregateFunction();
 
     template <LogicalType T>
+    static AggregateFunctionPtr MakeDsFrequentAggregateFunction();
+
+    static AggregateFunctionPtr MakeDsFrequentUnionAggregateFunction();
+
+    template <LogicalType T>
     static AggregateFunctionPtr MakeHllRawAggregateFunction();
 
     static AggregateFunctionPtr MakePercentileApproxAggregateFunction();
@@ -454,6 +459,15 @@ AggregateFunctionPtr AggregateFactory::MakeDsKllAggregateFunction() {
 
 inline AggregateFunctionPtr AggregateFactory::MakeDsKllUnionAggregateFunction() {
     return new DsSketchUnionAggregateFunction<DsKllFamily>();
+}
+
+template <LogicalType LT>
+AggregateFunctionPtr AggregateFactory::MakeDsFrequentAggregateFunction() {
+    return new DsSketchBuildAggregateFunction<LT, DsFrequentFamily>();
+}
+
+inline AggregateFunctionPtr AggregateFactory::MakeDsFrequentUnionAggregateFunction() {
+    return new DsSketchUnionAggregateFunction<DsFrequentFamily>();
 }
 
 template <LogicalType LT>

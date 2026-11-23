@@ -768,6 +768,31 @@ public class AnalyzeFunctionTest {
     }
 
     @Test
+    public void testDsFrequent() {
+        // Strings are counted too: a frequent items sketch needs only equality.
+        for (String column : List.of("ta", "tb", "tc", "td", "te", "tf", "th", "ti", "tj")) {
+            analyzeSuccess("select ds_frequent(" + column + ") from tall");
+        }
+        analyzeSuccess("select ds_frequent_items(ds_frequent(ta), 100) from tall");
+        analyzeSuccess("select ds_frequent_items(ds_frequent_union(s), 8) from " +
+                "(select tb, ds_frequent(tj) as s from tall group by tb) t");
+        analyzeFail("select ds_frequent(ta, 11) from tall");
+        analyzeFail("select ds_frequent_items(ds_frequent(ta)) from tall");
+
+        QueryStatement statement = (QueryStatement) analyzeSuccess("select ds_frequent(tj) from tall");
+        FunctionCallExpr call =
+                (FunctionCallExpr) ((SelectRelation) statement.getQueryRelation()).getOutputExpression().get(0);
+        AggregateFunction fn = (AggregateFunction) call.getFn();
+        ScalarType argType = (ScalarType) fn.getArgs()[0];
+        Assertions.assertTrue(argType.isDecimalV3());
+        Assertions.assertEquals(9, argType.getScalarPrecision());
+        Assertions.assertEquals(3, argType.getScalarScale());
+        Assertions.assertEquals(VarbinaryType.VARBINARY, fn.getReturnType());
+        // An aggregate function keeps no intermediate type when it is the return type.
+        Assertions.assertNull(fn.getIntermediateType());
+    }
+
+    @Test
     public void testMatrixTypeCast() {
         analyzeFail("select trim(b1) from test_object");
         analyzeFail("select trim(h1) from test_object");

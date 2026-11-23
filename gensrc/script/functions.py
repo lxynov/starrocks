@@ -894,6 +894,7 @@ vectorized_functions = [
 
     # data sketches scalar functions that read a serialized KLL or frequent items sketch
     [91110, 'ds_kll_histogram', False, False, 'VARCHAR', ['VARBINARY', 'INT'], 'DsSketchFunctions::ds_kll_histogram'],
+    [91111, 'ds_frequent_items', False, False, 'VARCHAR', ['VARBINARY', 'INT'], 'DsSketchFunctions::ds_frequent_items'],
 
     # hash function
     [100010, 'murmur_hash3_32', True, False, 'INT', ['VARCHAR', '...'], 'HashFunctions::murmur_hash3_32'],

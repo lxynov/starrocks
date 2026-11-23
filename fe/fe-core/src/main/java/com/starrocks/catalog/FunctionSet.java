@@ -359,6 +359,9 @@ public class FunctionSet {
     public static final String DS_KLL = "ds_kll";
     public static final String DS_KLL_UNION = "ds_kll_union";
     public static final String DS_KLL_HISTOGRAM = "ds_kll_histogram";
+    public static final String DS_FREQUENT = "ds_frequent";
+    public static final String DS_FREQUENT_UNION = "ds_frequent_union";
+    public static final String DS_FREQUENT_ITEMS = "ds_frequent_items";
     public static final String APPROX_TOP_K = "approx_top_k";
     public static final String AVG = "avg";
     public static final String COUNT = "count";
@@ -758,6 +761,13 @@ public class FunctionSet {
                     .addAll(DateType.DATE_TYPES)
                     .build();
 
+    // A frequent items sketch needs only equality, so strings qualify too.
+    private static final Set<Type> DS_FREQUENT_TYPES =
+            ImmutableSet.<Type>builder()
+                    .addAll(DS_KLL_TYPES)
+                    .addAll(STRING_TYPES)
+                    .build();
+
     private static final Set<Type> MULTI_DISTINCT_COUNT_TYPES =
             ImmutableSet.<Type>builder()
                     .addAll(IntegerType.INTEGER_TYPES)
@@ -1019,9 +1029,11 @@ public class FunctionSet {
                     .add(DS_THETA_ACCUMULATE)
                     .add(DS_THETA_COMBINE)
                     .add(DS_THETA_INTERSECT_COND_AGG)
-                    // ds_kll already returns its own state, which ds_kll_union merges.
+                    // ds_kll and ds_frequent already return their own state, which their unions merge.
                     .add(DS_KLL)
                     .add(DS_KLL_UNION)
+                    .add(DS_FREQUENT)
+                    .add(DS_FREQUENT_UNION)
                     // Functions with constant contexts in be are not supported.
                     .add(WINDOW_FUNNEL)
                     .add(APPROX_TOP_K)
@@ -1588,6 +1600,18 @@ public class FunctionSet {
                     false, false, false));
         }
         addBuiltin(AggregateFunction.createBuiltin(DS_KLL_UNION,
+                Lists.newArrayList(VarbinaryType.VARBINARY), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                false, false, false));
+
+        // ds_frequent(col) builds a serialized frequent items sketch, and ds_frequent_union(sketch) merges such
+        // sketches. DS_FREQUENT_ITEMS, which reads one, is a scalar function registered via
+        // gensrc/script/functions.py.
+        for (Type t : DS_FREQUENT_TYPES) {
+            addBuiltin(AggregateFunction.createBuiltin(DS_FREQUENT,
+                    Lists.newArrayList(t), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                    false, false, false));
+        }
+        addBuiltin(AggregateFunction.createBuiltin(DS_FREQUENT_UNION,
                 Lists.newArrayList(VarbinaryType.VARBINARY), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
                 false, false, false));
 

@@ -48,6 +48,7 @@ import com.starrocks.sql.optimizer.OptimizerFactory;
 import com.starrocks.sql.optimizer.base.ColumnRefFactory;
 import com.starrocks.sql.optimizer.statistics.Statistics;
 import com.starrocks.sql.parser.NodePosition;
+import com.starrocks.statistic.HistogramStatisticsCollectJob;
 import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.statistic.StatsConstants;
 import com.starrocks.statistic.columns.ColumnUsage;
@@ -93,6 +94,7 @@ public class AnalyzeStmtAnalyzer {
             StatsConstants.HISTOGRAM_SAMPLE_RATIO,
             StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
             StatsConstants.HISTOGRAM_COLLECT_MODE,
+            StatsConstants.HISTOGRAM_FULL_SCAN,
             StatsConstants.INIT_SAMPLE_STATS_JOB,
 
             StatsConstants.EXTERNAL_ANALYZE_SCAN_BYTES_CAP,
@@ -445,10 +447,12 @@ public class AnalyzeStmtAnalyzer {
                 List<Expr> columns;
                 Map<String, String> properties;
                 TableName tableName;
+                boolean fullScan;
                 if (statement instanceof AnalyzeStmt) {
                     AnalyzeStmt analyzeStmt = (AnalyzeStmt) statement;
                     columns = analyzeStmt.getColumns();
                     properties = analyzeStmt.getProperties();
+                    fullScan = !analyzeStmt.isSample();
                     TableRef tableRef = analyzeStmt.getTableRef();
                     tableName = new TableName(tableRef.getCatalogName(), tableRef.getDbName(),
                             tableRef.getTableName(), tableRef.getPos());
@@ -456,6 +460,7 @@ public class AnalyzeStmtAnalyzer {
                     CreateAnalyzeJobStmt createAnalyzeJobStmt = (CreateAnalyzeJobStmt) statement;
                     columns = createAnalyzeJobStmt.getColumns();
                     properties = createAnalyzeJobStmt.getProperties();
+                    fullScan = !createAnalyzeJobStmt.isSample();
                     TableRef tableRef = createAnalyzeJobStmt.getTableRef();
                     if (tableRef != null) {
                         tableName = new TableName(tableRef.getCatalogName(), tableRef.getDbName(),
@@ -508,6 +513,23 @@ public class AnalyzeStmtAnalyzer {
                         p -> String.valueOf(Config.histogram_sample_ratio));
                 properties.computeIfAbsent(StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
                         p -> String.valueOf(Config.histogram_collect_bucket_ndv_mode));
+
+                // FULL, or the property a statement that was analyzed before carries in its place.
+                fullScan = fullScan || Boolean.parseBoolean(properties.get(StatsConstants.HISTOGRAM_FULL_SCAN));
+                if (fullScan) {
+                    if (!analyzeTable.isNativeTableOrMaterializedView()) {
+                        throw new SemanticException("FULL is only supported for the histogram of a native table");
+                    }
+                    if (StatsConstants.HistogramCollectMode.resolve(properties) !=
+                            StatsConstants.HistogramCollectMode.SKETCH) {
+                        throw new SemanticException(HistogramStatisticsCollectJob.FULL_NEEDS_SKETCH_MODE);
+                    }
+                    // Every row is read: the sample ratio does not apply, and neither do the bounds that keep a
+                    // sample between statistic_sample_collect_rows and histogram_max_sample_row_count rows.
+                    properties.put(StatsConstants.HISTOGRAM_FULL_SCAN, "true");
+                    properties.put(StatsConstants.HISTOGRAM_SAMPLE_RATIO, "1");
+                    return;
+                }
 
                 double totalRows = 0;
                 if (analyzeTable.isNativeTableOrMaterializedView()) {

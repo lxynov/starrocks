@@ -1523,7 +1523,7 @@ dropStatsStatement
     ;
 
 histogramStatement:
-    ANALYZE TABLE tableName UPDATE HISTOGRAM ON analyzeColumnClause
+    ANALYZE (FULL | SAMPLE)? TABLE tableName UPDATE HISTOGRAM ON analyzeColumnClause
         (WITH bucket=INTEGER_VALUE BUCKETS)?
         properties?
     ;

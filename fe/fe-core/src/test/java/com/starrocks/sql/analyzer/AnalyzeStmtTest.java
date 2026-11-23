@@ -24,6 +24,7 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableName;
 import com.starrocks.common.AlreadyExistsException;
+import com.starrocks.common.Config;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DDLStmtExecutor;
@@ -37,6 +38,7 @@ import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.ast.AnalyzeHistogramDesc;
 import com.starrocks.sql.ast.AnalyzeMultiColumnDesc;
 import com.starrocks.sql.ast.AnalyzeStmt;
+import com.starrocks.sql.ast.CreateAnalyzeJobStmt;
 import com.starrocks.sql.ast.DropHistogramStmt;
 import com.starrocks.sql.ast.DropStatsStmt;
 import com.starrocks.sql.ast.KillAnalyzeStmt;
@@ -851,6 +853,62 @@ public class AnalyzeStmtTest {
 
         analyzeFail("analyze table db.tbl update histogram on kk1 properties(\"histogram_collect_mode\"=\"kll\")",
                 "Property 'histogram_collect_mode' value must be 'sort' or 'sketch'");
+    }
+
+    @Test
+    public void testHistogramFullAndSample() {
+        OlapTable t0 = (OlapTable) starRocksAssert.getCtx().getGlobalStateMgr()
+                .getLocalMetastore().getDb("db").getTable("tbl");
+        // Far more rows than a sample is allowed to hold.
+        for (Partition partition : t0.getAllPartitions()) {
+            partition.getDefaultPhysicalPartition().getLatestBaseIndex().setRowCount(2000000000L);
+        }
+        String sketch = " properties(\"histogram_collect_mode\"=\"sketch\")";
+
+        // No keyword means a sample, as it always has, and so does SAMPLE: the ratio is cut so that the sample
+        // stays within histogram_max_sample_row_count rows.
+        for (String keyword : List.of("", "sample ")) {
+            AnalyzeStmt sampled = (AnalyzeStmt) analyzeSuccess(
+                    "analyze " + keyword + "table db.tbl update histogram on kk1" + sketch);
+            Assertions.assertTrue(sampled.isSample());
+            Assertions.assertFalse(sampled.getProperties().containsKey(StatsConstants.HISTOGRAM_FULL_SCAN));
+            Assertions.assertEquals("0.005", sampled.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+        }
+
+        // FULL reads every row: no ratio applies, not even one the statement gives.
+        AnalyzeStmt full = (AnalyzeStmt) analyzeSuccess("analyze full table db.tbl update histogram on kk1 " +
+                "with 32 buckets properties(\"histogram_collect_mode\"=\"sketch\", \"histogram_sample_ratio\"=\"0.3\")");
+        Assertions.assertFalse(full.isSample());
+        Assertions.assertEquals("true", full.getProperties().get(StatsConstants.HISTOGRAM_FULL_SCAN));
+        Assertions.assertEquals("1", full.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+        Assertions.assertEquals("32", full.getProperties().get(StatsConstants.HISTOGRAM_BUCKET_NUM));
+
+        // A scheduled job takes the same keywords.
+        CreateAnalyzeJobStmt job = (CreateAnalyzeJobStmt) analyzeSuccess(
+                "create analyze full table db.tbl update histogram on kk1" + sketch);
+        Assertions.assertEquals(StatsConstants.AnalyzeType.HISTOGRAM, job.getAnalyzeType());
+        Assertions.assertEquals("true", job.getProperties().get(StatsConstants.HISTOGRAM_FULL_SCAN));
+        Assertions.assertEquals("1", job.getProperties().get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
+        job = (CreateAnalyzeJobStmt) analyzeSuccess("create analyze sample table db.tbl update histogram on kk1");
+        Assertions.assertFalse(job.getProperties().containsKey(StatsConstants.HISTOGRAM_FULL_SCAN));
+
+        // Sort mode would send every row through one thread, so FULL is refused in it, whether the mode comes
+        // from the statement or from the configuration.
+        String needsSketch = "needs histogram_collect_mode 'sketch'";
+        analyzeFail("analyze full table db.tbl update histogram on kk1", needsSketch);
+        analyzeFail("analyze full table db.tbl update histogram on kk1 " +
+                "properties(\"histogram_collect_mode\"=\"sort\")", needsSketch);
+        analyzeFail("create analyze full table db.tbl update histogram on kk1", needsSketch);
+        String configured = Config.histogram_collect_mode;
+        Config.histogram_collect_mode = "sketch";
+        try {
+            full = (AnalyzeStmt) analyzeSuccess("analyze full table db.tbl update histogram on kk1");
+            Assertions.assertEquals("true", full.getProperties().get(StatsConstants.HISTOGRAM_FULL_SCAN));
+            // The mode itself is still not stored: the job keeps following the configuration.
+            Assertions.assertFalse(full.getProperties().containsKey(StatsConstants.HISTOGRAM_COLLECT_MODE));
+        } finally {
+            Config.histogram_collect_mode = configured;
+        }
     }
 
     @Test

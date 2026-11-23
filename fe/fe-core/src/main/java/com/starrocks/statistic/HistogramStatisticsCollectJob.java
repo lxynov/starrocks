@@ -18,6 +18,7 @@ import com.google.common.base.Stopwatch;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
+import com.starrocks.common.DdlException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.type.Type;
 import org.apache.logging.log4j.LogManager;
@@ -31,6 +32,9 @@ import java.util.concurrent.TimeUnit;
 
 public class HistogramStatisticsCollectJob extends StatisticsCollectJob {
     private static final Logger LOG = LogManager.getLogger(HistogramStatisticsCollectJob.class);
+
+    public static final String FULL_NEEDS_SKETCH_MODE = "Collecting a histogram from every row needs " +
+            "histogram_collect_mode 'sketch': sort mode would send every row through one thread";
 
     public HistogramStatisticsCollectJob(Database db, Table table, List<String> columnNames, List<Type> columnTypes,
                                          StatsConstants.ScheduleType scheduleType, Map<String, String> properties) {
@@ -49,6 +53,10 @@ public class HistogramStatisticsCollectJob extends StatisticsCollectJob {
             if (params.collectMode() == StatsConstants.HistogramCollectMode.SKETCH) {
                 new HistogramCollector(new SketchHistogramTraits(this, params)).collect(context, analyzeStatus);
             } else {
+                if (params.fullScan()) {
+                    // The statement was accepted when sketch mode was in effect, and it no longer is.
+                    throw new DdlException(FULL_NEEDS_SKETCH_MODE);
+                }
                 // histogram() takes one globally sorted stream, so it only runs as a single-stage aggregation.
                 context.getSessionVariable().setNewPlanerAggStage(1);
                 new HistogramCollector(new NativeHistogramTraits(this, params)).collect(context, analyzeStatus);

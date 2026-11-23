@@ -21,6 +21,7 @@ import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Table;
 import com.starrocks.common.Config;
+import com.starrocks.common.DdlException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.StatementBase;
@@ -335,6 +336,55 @@ public class SketchHistogramCollectTest extends HistogramStatisticsCollectJobTes
             // cast of its text, which for a FLOAT is not the same as the bare literal 0.1.
             Assertions.assertTrue(fixture.rawQueries().get(1).contains(
                     "`v1` IN (CAST('0.1' AS float)) AS m0"), fixture.rawQueries().get(1));
+        }
+    }
+
+    @Test
+    public void testFullScanReadsEveryRow() throws Exception {
+        try (Fixture fixture = new Fixture(connectContext, List.of("v1"), List.of(IntegerType.BIGINT),
+                "0.1", "100", "sample")) {
+            // What ANALYZE FULL TABLE ... UPDATE HISTOGRAM leaves in the job's properties.
+            fixture.job.getProperties().put(StatsConstants.HISTOGRAM_FULL_SCAN, "true");
+            fixture.ndv("v1", 1000);
+            fixture.reply(frequentItems(1000, 0, "5", 1));
+            fixture.reply("{\"count\":1000,\"min\":\"1\",\"max\":\"9\",\"buckets\":[[\"1\",\"9\",1]]}");
+            fixture.reply("[[\"1\",\"9\",\"1000\",\"111\",\"8\"]]");
+
+            fixture.collect();
+
+            // No pass samples, whatever ratio the job carries.
+            assertSqlStatements(List.of(
+                    "SELECT ds_frequent_items(ds_frequent(`v1`), 2048) FROM `test`.`t0_stats`",
+                    "SELECT ds_kll_histogram(ds_kll(v0), 64) FROM (SELECT `v1` AS v0 FROM `test`.`t0_stats`) t",
+                    "SELECT histogram_hll_ndv(v0, '[[\"1\",\"9\",\"1000\",\"111\"]]') FROM " +
+                            "(SELECT `v1` AS v0 FROM `test`.`t0_stats`) t"),
+                    fixture.queries());
+            // So neither the row counts nor the distinct counts are scaled, in sample mode either.
+            String expectedSql = """
+                    INSERT INTO _statistics_.histogram_statistics(\
+                    table_id, column_name, db_id, table_name, buckets, mcv, update_time) VALUES \
+                    (%d, 'v1', %d, 'test.t0_stats', '[["1","9","1000","125","8"]]', NULL, NOW());
+                    """.formatted(fixture.table.getId(), fixture.db.getId()).strip();
+            Assertions.assertEquals(List.of(expectedSql), fixture.insertSql());
+        }
+    }
+
+    @Test
+    public void testFullScanIsRefusedOnceTheJobRunsInSortMode() {
+        try (Fixture fixture = new Fixture(connectContext, List.of("v1"), List.of(IntegerType.BIGINT),
+                "1", "100", "none")) {
+            // A scheduled job that was created FULL while the configuration said sketch, and it no longer does.
+            fixture.job.getProperties().put(StatsConstants.HISTOGRAM_FULL_SCAN, "true");
+            fixture.job.getProperties().remove(StatsConstants.HISTOGRAM_COLLECT_MODE);
+            Assertions.assertEquals("sort", Config.histogram_collect_mode);
+
+            NativeAnalyzeStatus status = new NativeAnalyzeStatus();
+            DdlException e = Assertions.assertThrows(DdlException.class,
+                    () -> fixture.job.collect(connectContext, status));
+            Assertions.assertTrue(e.getMessage().contains("needs histogram_collect_mode 'sketch'"), e.getMessage());
+            Assertions.assertEquals(0, fixture.sortModeQueries);
+            Assertions.assertTrue(fixture.queries().isEmpty());
+            Assertions.assertEquals("sort", status.getProperties().get(StatsConstants.HISTOGRAM_COLLECT_MODE));
         }
     }
 

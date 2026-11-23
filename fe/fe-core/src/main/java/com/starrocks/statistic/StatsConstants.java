@@ -17,6 +17,7 @@ package com.starrocks.statistic;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
+import com.starrocks.common.Config;
 
 import java.util.List;
 import java.util.Map;
@@ -114,6 +115,9 @@ public class StatsConstants {
     public static final String HISTOGRAM_SAMPLE_RATIO = "histogram_sample_ratio";
     public static final String HISTOGRAM_COLLECT_BUCKET_NDV_MODE = "histogram_collect_bucket_ndv_mode";
     public static final String HISTOGRAM_COLLECT_MODE = "histogram_collect_mode";
+    // Set by the analyzer for ANALYZE FULL TABLE ... UPDATE HISTOGRAM: the job reads every row, which is more
+    // than a sample ratio of 1 says - a small table gets that ratio too, from a job that asked for a sample.
+    public static final String HISTOGRAM_FULL_SCAN = "histogram_full_scan";
 
     // What a native histogram collection reports about itself, next to the properties it ran under.
     public static final String HISTOGRAM_COLLECT_QUERIES = "histogram_collect_queries";
@@ -198,6 +202,15 @@ public class StatsConstants {
                 }
             }
             return null;
+        }
+
+        /**
+         * The mode a job with these properties runs in: the one it names, or else the configured default. Null
+         * when that names no mode.
+         */
+        public static HistogramCollectMode resolve(Map<String, String> properties) {
+            String mode = properties.get(HISTOGRAM_COLLECT_MODE);
+            return parse(mode != null ? mode : Config.histogram_collect_mode);
         }
     }
 

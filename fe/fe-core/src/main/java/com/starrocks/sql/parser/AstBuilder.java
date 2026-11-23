@@ -3436,7 +3436,10 @@ public class AstBuilder extends com.starrocks.sql.parser.StarRocksBaseVisitor<Pa
             bucket = Config.histogram_buckets_size;
         }
 
-        return new AnalyzeStmt(tableRef, analyzeColumn.second, null, properties, true,
+        // Without a keyword a histogram is collected from a sample, as it always was. Basic statistics take a
+        // missing keyword as FULL, but doing that here would turn existing statements into full scans.
+        boolean isSample = context.FULL() == null;
+        return new AnalyzeStmt(tableRef, analyzeColumn.second, null, properties, isSample,
                 false, analyzeColumn.first, new AnalyzeHistogramDesc(bucket), createPos(context));
     }
 

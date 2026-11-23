@@ -90,6 +90,15 @@ This topic introduces the following types of FE configurations:
 - Description: Maximum total size (in bytes) of the low-cardinality global dictionary cache (`CacheDictManager`). The cache is bounded by the combined byte size of its cached dictionaries rather than by entry count, so its memory footprint is bounded directly (each dictionary can be up to ~1 MB). When the limit is reached the least-valuable dictionaries are evicted, and affected columns fall back to non-dictionary query plans until re-collected. Changes apply to the live cache within one config-refresh cycle. The current tracked size is exported via the `low_cardinality_dict_cache_bytes` metric.
 - Introduced in: v4.1.0
 
+### `histogram_cache_max_bytes`
+
+- Default: 1073741824
+- Type: Long
+- Unit: Bytes
+- Is mutable: Yes
+- Description: Maximum total size (in bytes) of the histograms that an FE keeps in its statistics cache. A histogram holds up to `histogram_mcv_size` most common values of any length and a list of buckets, which is far more than the few numbers that basic statistics take for a column. Therefore, the histogram caches are bounded by the estimated byte size of their histograms rather than by `statistic_cache_columns` entries. When the limit is reached, the least-valuable histograms are evicted and are loaded again from the statistics tables when they are next needed. The limit applies to the cache of native table histograms and, separately, to the cache of external table histograms. Changes apply to the live caches within one config-refresh cycle. When `enable_statistic_cache_metrics` is set to `true`, the current size is exported via the `statistics_cache_bytes` metric.
+- Introduced in: -
+
 ### `enable_dict_thrash_guard`
 
 - Default: true

@@ -1387,17 +1387,24 @@ public final class MetricRepo {
                         "Cumulative number of failed statistics cache loads",
                         c -> c.stats().loadFailureCount());
                 // Current cache occupancy — a point-in-time value, so it stays a GAUGE.
-                addStatisticsCacheGauge(cacheName, cache, "statistics_cache_entries",
+                addStatisticsCacheGauge(cacheName, cache, "statistics_cache_entries", MetricUnit.NOUNIT,
                         "Number of entries currently held in the statistics cache",
                         LoadingCache::estimatedSize);
+                // Only the caches bounded by bytes rather than by entries have a size in bytes to report.
+                if (CachedStatisticStorage.weightedBytes(cache).isPresent()) {
+                    addStatisticsCacheGauge(cacheName, cache, "statistics_cache_bytes", MetricUnit.BYTES,
+                            "Estimated bytes of the entries currently held in the statistics cache",
+                            c -> CachedStatisticStorage.weightedBytes(c).orElse(0L));
+                }
             }
         }
 
     }
 
-    private static void addStatisticsCacheGauge(String cacheName, LoadingCache<?, ?> cache, String metricName, String description,
+    private static void addStatisticsCacheGauge(String cacheName, LoadingCache<?, ?> cache, String metricName,
+                                                MetricUnit unit, String description,
                                                 Function<LoadingCache<?, ?>, Long> cacheMetricFun) {
-        final var gauge = new GaugeMetric<>(metricName, MetricUnit.NOUNIT, description) {
+        final var gauge = new GaugeMetric<>(metricName, unit, description) {
             @Override
             public Long getValue() {
                 return cache == null ? 0L : cacheMetricFun.apply(cache);

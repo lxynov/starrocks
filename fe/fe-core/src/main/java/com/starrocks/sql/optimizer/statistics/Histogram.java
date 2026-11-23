@@ -24,6 +24,14 @@ import java.util.Optional;
 import javax.annotation.Nonnull;
 
 public class Histogram {
+    // What one bucket takes on the heap: the Bucket itself, its boxed count and upper_repeats, the Optional
+    // with the boxed distinct count, and its slot in the list.
+    private static final long BUCKET_BYTES = 112;
+    // What one most common value takes besides its characters: the map entry and its table slot, the String
+    // with its array header, and the boxed count.
+    private static final long MCV_ENTRY_BYTES = 96;
+    // The Histogram itself and its two collections when they are empty.
+    private static final long BASE_BYTES = 128;
 
     private final List<Bucket> buckets;
     private final Map<String, Long> mcv;
@@ -31,6 +39,19 @@ public class Histogram {
     public Histogram(List<Bucket> buckets, Map<String, Long> mcv) {
         this.buckets = buckets == null ? List.of() : buckets;
         this.mcv = mcv == null ? Map.of() : mcv;
+    }
+
+    /**
+     * Roughly what this histogram takes on the heap. An estimate from the number of buckets and the number and
+     * length of the most common values, which is what its size varies with; good enough to bound a cache by.
+     */
+    public long estimateBytes() {
+        long bytes = BASE_BYTES + buckets.size() * BUCKET_BYTES + mcv.size() * MCV_ENTRY_BYTES;
+        for (String value : mcv.keySet()) {
+            // Two bytes a character: the upper bound, which only non-Latin-1 strings reach.
+            bytes += 2L * value.length();
+        }
+        return bytes;
     }
 
     public long getTotalRows() {

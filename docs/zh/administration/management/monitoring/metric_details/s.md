@@ -654,7 +654,7 @@ products: [oss, enterprise, cloud, anywhere]
 - 单位：计数
 - 类型：瞬时值
 - 标签：`cache` — 统计信息缓存名称：`table_stats`、`column_stats`、`partition_stats`、`connector_table_stats`、`histogram_stats`、`connector_histogram_stats` 或 `multi_column_stats`。
-- 描述：对应统计信息缓存（基于 Caffeine）中当前大致的条目数。每个缓存的最大条目数由 FE 配置项 `statistic_cache_columns` 控制。仅当 FE 配置项 `enable_statistic_cache_metrics` 设置为 `true` 时才会注册并暴露该指标。
+- 描述：对应统计信息缓存（基于 Caffeine）中当前大致的条目数。每个缓存的最大条目数由 FE 配置项 `statistic_cache_columns` 控制，但 `histogram_stats` 和 `connector_histogram_stats` 缓存除外，这两个缓存以字节数为上界（参见 `statistics_cache_bytes`）。仅当 FE 配置项 `enable_statistic_cache_metrics` 设置为 `true` 时才会注册并暴露该指标。
 
 ## `starrocks_fe_statistics_cache_eviction_count`
 
@@ -919,6 +919,13 @@ products: [oss, enterprise, cloud, anywhere]
 - 单位：计数
 - 类型：瞬时
 - 描述：表示特定仓库下正在运行的RESTORE任务数量。对于存算一体集群，此项仅监控默认仓库。对于存算分离集群，此值始终为 `0`。
+
+## `statistics_cache_bytes`
+
+- 单位：字节
+- 类型：瞬时
+- 标签：`cache` — 统计信息缓存名称：`histogram_stats` 或 `connector_histogram_stats`。
+- 描述：FE 指标。对应统计信息缓存中当前保存的直方图的估算总大小。直方图缓存以该大小而不是条目数为上界。每个缓存的上限由 FE 配置项 `histogram_cache_max_bytes` 控制。如果该值长期处于上限，同时同一缓存的 `starrocks_fe_statistics_cache_eviction_count` 持续增长，说明可以适当调大 `histogram_cache_max_bytes`。仅当 FE 配置项 `enable_statistic_cache_metrics` 设置为 `true` 时才会注册并暴露该指标。
 
 ## `storage_page_cache_mem_bytes`
 

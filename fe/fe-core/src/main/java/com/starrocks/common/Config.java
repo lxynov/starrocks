@@ -3006,6 +3006,13 @@ public class Config extends ConfigBase {
     @ConfField
     public static long statistic_cache_columns = 100000;
 
+    @ConfField(mutable = true, comment = "Maximum total bytes of the histograms an FE keeps in its statistics " +
+            "cache. A histogram holds up to histogram_mcv_size values and a bucket list, far more than the few " +
+            "numbers basic statistics take per column, so the histogram caches are bounded by size rather than by " +
+            "statistic_cache_columns entries. The limit applies to the cache of native table histograms and, " +
+            "separately, to that of external table histograms")
+    public static long histogram_cache_max_bytes = 1024L * 1024 * 1024;
+
     /**
      * The max number of io tasks for each connector operator in collect statistic
      */

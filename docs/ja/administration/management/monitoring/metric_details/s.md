@@ -628,7 +628,7 @@ products: [oss, enterprise, cloud, anywhere]
 - 単位: カウント
 - タイプ: ゲージ
 - ラベル: `cache` — 統計情報キャッシュの名前: `table_stats`、`column_stats`、`partition_stats`、`connector_table_stats`、`histogram_stats`、`connector_histogram_stats`、または `multi_column_stats`。
-- 説明: 対象の統計情報キャッシュ（Caffeine ベース）に現在保持されているおおよそのエントリ数。キャッシュごとの最大値は FE 設定 `statistic_cache_columns` で制御されます。FE 設定 `enable_statistic_cache_metrics` が `true` に設定されている場合にのみ登録・公開されます。
+- 説明: 対象の統計情報キャッシュ（Caffeine ベース）に現在保持されているおおよそのエントリ数。キャッシュごとの最大値は FE 設定 `statistic_cache_columns` で制御されます。ただし、`histogram_stats` キャッシュと `connector_histogram_stats` キャッシュは例外で、バイト単位のサイズで上限が設定されます（`statistics_cache_bytes` を参照）。FE 設定 `enable_statistic_cache_metrics` が `true` に設定されている場合にのみ登録・公開されます。
 
 ## `starrocks_fe_statistics_cache_eviction_count`
 
@@ -893,6 +893,13 @@ products: [oss, enterprise, cloud, anywhere]
 - 単位: カウント
 - タイプ: 瞬間的
 - 説明: 特定のウェアハウスで実行中のRESTOREタスクの数を示します。共有なしクラスターの場合、この項目はデフォルトのウェアハウスのみを監視します。共有データクラスターの場合、この値は常に`0`です。
+
+## `statistics_cache_bytes`
+
+- 単位: バイト
+- タイプ: 瞬間的
+- ラベル: `cache` — 統計情報キャッシュの名前: `histogram_stats` または `connector_histogram_stats`。
+- 説明: FE メトリクス。対象の統計情報キャッシュに現在保持されているヒストグラムの推定合計サイズ。ヒストグラムキャッシュは、エントリ数ではなくこのサイズで上限が設定されます。キャッシュごとの最大値は FE 設定 `histogram_cache_max_bytes` で制御されます。この値が最大値に張り付いたまま、同じキャッシュの `starrocks_fe_statistics_cache_eviction_count` が増加し続ける場合は、`histogram_cache_max_bytes` の引き上げを検討してください。FE 設定 `enable_statistic_cache_metrics` が `true` に設定されている場合にのみ登録・公開されます。
 
 ## `storage_page_cache_mem_bytes`
 

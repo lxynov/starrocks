@@ -18,6 +18,7 @@ import com.github.benmanes.caffeine.cache.AsyncCacheLoader;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.Weigher;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
@@ -64,6 +65,11 @@ import static com.starrocks.metric.MetricRepo.SYNC_STATS_LOAD_BUDGET_EXHAUSTED_T
 public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable {
     private static final Logger LOG = LogManager.getLogger(CachedStatisticStorage.class);
 
+    // What a histogram cache entry costs before its histogram: the key with its column name, the Optional and
+    // the future around it, and the cache's node.
+    @VisibleForTesting
+    static final int HISTOGRAM_CACHE_ENTRY_OVERHEAD_BYTES = 256;
+
     private final Executor statsCacheRefresherExecutor =
             ThreadPoolManager.newDaemonFixedThreadPoolWithUnboundedQueue(Config.statistic_cache_thread_pool_size,
                     "stats-cache-refresher", true);
@@ -81,10 +87,10 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             createAsyncLoadingCache(new ConnectorColumnStatsCacheLoader());
 
     AsyncLoadingCache<ColumnStatsCacheKey, Optional<Histogram>> histogramCache =
-            createAsyncLoadingCache(new ColumnHistogramStatsCacheLoader());
+            createHistogramCache(new ColumnHistogramStatsCacheLoader());
 
     AsyncLoadingCache<ConnectorTableColumnKey, Optional<Histogram>> connectorHistogramCache =
-            createAsyncLoadingCache(new ConnectorHistogramColumnStatsCacheLoader());
+            createHistogramCache(new ConnectorHistogramColumnStatsCacheLoader());
 
     AsyncLoadingCache<Long, Optional<MultiColumnCombinedStatistics>> multiColumnStats =
             createAsyncLoadingCache(new MultiColumnCombinedStatsCacheLoader());
@@ -825,9 +831,35 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
     }
 
     private <K, V> AsyncLoadingCache<K, V> createAsyncLoadingCache(AsyncCacheLoader<K, V> cacheLoader) {
+        return newCacheBuilder().maximumSize(Config.statistic_cache_columns).buildAsync(cacheLoader);
+    }
+
+    /**
+     * A histogram cache is bounded by the bytes it holds, not by how many entries it has. The other caches hold
+     * a few numbers per entry, so a count bounds their memory well. A histogram is up to histogram_mcv_size
+     * values of any length plus a bucket list: statistic_cache_columns of those can come to gigabytes.
+     */
+    private <K> AsyncLoadingCache<K, Optional<Histogram>> createHistogramCache(
+            AsyncCacheLoader<K, Optional<Histogram>> cacheLoader) {
+        return newCacheBuilder()
+                .maximumWeight(Math.max(0, Config.histogram_cache_max_bytes))
+                .weigher((Weigher<K, Optional<Histogram>>) (key, histogram) -> histogramCacheWeight(histogram))
+                .buildAsync(cacheLoader);
+    }
+
+    /**
+     * The bytes one histogram cache entry counts for. A column that turned out to have no histogram is cached
+     * too, as an empty entry, and still costs its key and the cache's own bookkeeping.
+     */
+    @VisibleForTesting
+    static int histogramCacheWeight(Optional<Histogram> histogram) {
+        long bytes = HISTOGRAM_CACHE_ENTRY_OVERHEAD_BYTES + histogram.map(Histogram::estimateBytes).orElse(0L);
+        return (int) Math.min(Integer.MAX_VALUE, bytes);
+    }
+
+    private Caffeine<Object, Object> newCacheBuilder() {
         Caffeine<Object, Object> cacheBuilder = Caffeine.newBuilder()
                 .expireAfterWrite(Config.statistic_update_interval_sec * 2, TimeUnit.SECONDS)
-                .maximumSize(Config.statistic_cache_columns)
                 .executor(statsCacheRefresherExecutor);
 
         // Only enable refreshAfterWrite if the config is enabled
@@ -839,7 +871,36 @@ public class CachedStatisticStorage implements StatisticStorage, MemoryTrackable
             cacheBuilder.recordStats();
         }
 
-        return cacheBuilder.buildAsync(cacheLoader);
+        return cacheBuilder;
+    }
+
+    /**
+     * The bytes of the entries a cache currently holds, for a cache bounded by them; empty for a cache bounded
+     * by its entry count.
+     */
+    public static Optional<Long> weightedBytes(LoadingCache<?, ?> cache) {
+        return cache.policy().eviction()
+                .filter(eviction -> eviction.isWeighted())
+                .map(eviction -> eviction.weightedSize().orElse(0L));
+    }
+
+    /** Applies changes of histogram_cache_max_bytes to the live caches. Called once, after GlobalStateMgr is up. */
+    public void registerConfigRefreshListener() {
+        GlobalStateMgr.getCurrentState().getConfigRefreshDaemon().registerListener(this::refreshHistogramCacheMaximum);
+    }
+
+    @VisibleForTesting
+    void refreshHistogramCacheMaximum() {
+        long newMax = Math.max(0, Config.histogram_cache_max_bytes);
+        for (LoadingCache<?, ?> cache : List.of(histogramCache.synchronous(), connectorHistogramCache.synchronous())) {
+            cache.policy().eviction().ifPresent(eviction -> {
+                long oldMax = eviction.getMaximum();
+                if (oldMax != newMax) {
+                    eviction.setMaximum(newMax);
+                    LOG.info("update histogram cache max bytes from {} to {}", oldMax, newMax);
+                }
+            });
+        }
     }
 
     private <T> void waitForStatsFutureIfWaitEnabled(CompletableFuture<T> future, Supplier<String> contextSupplier)

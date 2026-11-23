@@ -632,7 +632,7 @@ All transaction metrics share the following labels:
 - Unit: Count
 - Type: Gauge
 - Labels: `cache` — the statistics cache: `table_stats`, `column_stats`, `partition_stats`, `connector_table_stats`, `histogram_stats`, `connector_histogram_stats`, or `multi_column_stats`.
-- Description: Approximate number of entries currently held in the given statistics cache (backed by Caffeine). The maximum per cache is controlled by the FE config `statistic_cache_columns`. Only registered and exposed when the FE config `enable_statistic_cache_metrics` is set to `true`.
+- Description: Approximate number of entries currently held in the given statistics cache (backed by Caffeine). The maximum per cache is controlled by the FE config `statistic_cache_columns`, except for the `histogram_stats` and `connector_histogram_stats` caches, which are bounded by their size in bytes (see `statistics_cache_bytes`). Only registered and exposed when the FE config `enable_statistic_cache_metrics` is set to `true`.
 
 ## `starrocks_fe_statistics_cache_eviction_count`
 
@@ -897,6 +897,13 @@ Values recorded by the derived tier, which refreshes a range-distributed increme
 - Unit: Count
 - Type: Instantaneous
 - Description: Indicates the number of running RESTORE tasks under the specific warehouse. For a shared-nothing cluster, this item only monitors the default warehouse. For a shared-data cluster, this value is always `0`.
+
+## `statistics_cache_bytes`
+
+- Unit: Bytes
+- Type: Instantaneous
+- Labels: `cache` — the statistics cache: `histogram_stats` or `connector_histogram_stats`.
+- Description: FE metric. Estimated total size of the histograms currently held in the given statistics cache. The histogram caches are bounded by this size rather than by their number of entries. The maximum per cache is controlled by the FE configuration item `histogram_cache_max_bytes`. A value that stays at the maximum while `starrocks_fe_statistics_cache_eviction_count` keeps rising for the same cache suggests raising `histogram_cache_max_bytes`. Only registered and exposed when the FE configuration item `enable_statistic_cache_metrics` is set to `true`.
 
 ## `storage_page_cache_mem_bytes`
 

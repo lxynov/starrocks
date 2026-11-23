@@ -91,6 +91,7 @@ public class MemoryUsageTracker extends FrontendDaemon {
         registerMemoryTracker("Agent", new AgentTaskTracker());
         if (currentState.getStatisticStorage() instanceof CachedStatisticStorage) {
             registerMemoryTracker("Statistics", (CachedStatisticStorage) currentState.getStatisticStorage());
+            ((CachedStatisticStorage) currentState.getStatisticStorage()).registerConfigRefreshListener();
         }
         registerMemoryTracker("Statistics", (CacheRelaxDictManager) IRelaxDictManager.getInstance());
         registerMemoryTracker("Statistics", (ColumnMinMaxMgr) IMinMaxStatsMgr.internalInstance());

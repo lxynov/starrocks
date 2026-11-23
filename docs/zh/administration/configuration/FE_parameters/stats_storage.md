@@ -90,6 +90,15 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - 描述: 低基数全局字典缓存（`CacheDictManager`）的最大总字节数。该缓存以所缓存字典的总字节数为上界（而非条目数），因此可直接限制内存占用（每个字典最大约 1 MB）。达到上限时会淘汰价值最低的字典，受影响的列在重新采集前回退到非字典查询计划。修改会在一个配置刷新周期内应用到运行中的缓存。当前统计的大小通过 `low_cardinality_dict_cache_bytes` 指标导出。
 - 引入版本: v4.1.0
 
+### `histogram_cache_max_bytes`
+
+- 默认值: 1073741824
+- 类型: Long
+- 单位: 字节
+- 是否可变: Yes
+- 描述: FE 在统计信息缓存中保存的直方图的最大总字节数。一个直方图最多包含 `histogram_mcv_size` 个任意长度的 MCV 以及一个分桶列表，远多于基础统计信息为一列保存的几个数值。因此，直方图缓存以其中直方图的估算字节数为上界，而不是以 `statistic_cache_columns` 个条目为上界。达到上限时会淘汰价值最低的直方图，之后需要时再从统计信息表中重新加载。该上限分别作用于内表直方图缓存和外部表直方图缓存。修改会在一个配置刷新周期内应用到运行中的缓存。当 `enable_statistic_cache_metrics` 设置为 `true` 时，当前大小通过 `statistics_cache_bytes` 指标导出。
+- 引入版本: -
+
 ### `enable_dict_thrash_guard`
 
 - 默认值: true

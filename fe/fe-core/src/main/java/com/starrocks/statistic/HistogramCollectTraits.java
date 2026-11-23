@@ -48,6 +48,10 @@ abstract class HistogramCollectTraits {
         this.catalogName = job.getCatalogName();
     }
 
+    /** One column's collected histogram, before it is turned into a buffered row. */
+    record ColumnHistogram(String buckets, String mcvJson) {
+    }
+
     /** Statistics table the collected rows are inserted into. */
     abstract String statsTableName();
 
@@ -70,6 +74,28 @@ abstract class HistogramCollectTraits {
      */
     abstract String buildBucketsQuery(ConnectContext context, AnalyzeStatus analyzeStatus, String columnName,
                                       Type columnType, Map<String, String> mostCommonValues) throws Exception;
+
+    /**
+     * Hook run once before the first column is collected. A flavour that works on many columns at a time does
+     * its queries here and hands the results out from {@link #collectColumn}.
+     */
+    void beforeCollection(ConnectContext context, AnalyzeStatus analyzeStatus) throws Exception {
+    }
+
+    /**
+     * Collects one column's histogram. By default that is two queries: the most common values, then the
+     * buckets over everything else.
+     */
+    ColumnHistogram collectColumn(ConnectContext context, AnalyzeStatus analyzeStatus, String columnName,
+                                  Type columnType) throws Exception {
+        List<TStatisticData> mcv = job.queryStatisticSync(buildMcvQuery(columnName), context, analyzeStatus);
+        Map<String, String> mostCommonValues = buildMostCommonValues(mcv);
+
+        String bucketsQuery = buildBucketsQuery(context, analyzeStatus, columnName, columnType, mostCommonValues);
+        String buckets = singleResult(job.queryStatisticSync(bucketsQuery, context, analyzeStatus), columnName).histogram;
+
+        return new ColumnHistogram(buckets, HistogramStatisticsUtils.buildMcvJson(mostCommonValues));
+    }
 
     /** One buffered row, as expressions and as SQL text; the two must stay in lockstep. */
     abstract List<Expr> buildInsertRow(String columnName, String buckets, String mcvJson);

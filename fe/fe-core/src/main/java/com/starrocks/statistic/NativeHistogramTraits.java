@@ -43,11 +43,12 @@ import static com.starrocks.statistic.StatsConstants.HISTOGRAM_STATISTICS_TABLE_
 
 /**
  * Histogram collection for a native (internal) table: the buckets come from the sampled
- * {@code histogram()} aggregate, and the rows carry the table and database ids.
+ * {@code histogram()} aggregate, and the rows carry the table and database ids. This is the sort mode;
+ * {@link SketchHistogramTraits} collects the same rows from sketches instead.
  *
  * @see HistogramCollector
  */
-final class NativeHistogramTraits extends HistogramCollectTraits {
+class NativeHistogramTraits extends HistogramCollectTraits {
     private static final String MCV_STATISTIC_TEMPLATE =
             "select cast(version as INT), cast(db_id as BIGINT), cast(table_id as BIGINT), " +
                     "cast(column_key as varchar), cast(column_value as varchar) from (" +

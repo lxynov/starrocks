@@ -18,24 +18,22 @@ import com.starrocks.common.Config;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.expression.Expr;
-import com.starrocks.thrift.TStatisticData;
+import com.starrocks.statistic.HistogramCollectTraits.ColumnHistogram;
 import com.starrocks.type.Type;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import static com.starrocks.statistic.HistogramStatisticsUtils.batchInsertPrefixSize;
 import static com.starrocks.statistic.HistogramStatisticsUtils.buildBatchInsertPrefix;
-import static com.starrocks.statistic.HistogramStatisticsUtils.buildMcvJson;
 import static com.starrocks.statistic.HistogramStatisticsUtils.createInsertStmt;
 import static com.starrocks.statistic.HistogramStatisticsUtils.utf8Length;
 
 /**
- * Collects a histogram per column: query the column's most common values, query its buckets, then
- * write the rows back as one buffered INSERT ... VALUES per
+ * Collects a histogram per column: have the {@link HistogramCollectTraits} collect the column's most common
+ * values and buckets, then write the rows back as one buffered INSERT ... VALUES per
  * {@link Config#histogram_batch_insert_buffer_size} worth of SQL. Anything that differs between
  * native and external tables comes from the {@link HistogramCollectTraits}.
  *
@@ -67,6 +65,7 @@ final class HistogramCollector {
         Exception lastFailure = null;
 
         try {
+            traits.beforeCollection(context, analyzeStatus);
             for (int i = 0; i < columnNames.size(); i++) {
                 String columnName = columnNames.get(i);
                 Type columnType = columnTypes.get(i);
@@ -109,7 +108,8 @@ final class HistogramCollector {
                     bufferSize = batchInsertPrefixSize(statsTableName);
                 }
 
-                analyzeStatus.setProgress((i + 1) * 99L / columnNames.size());
+                // Never backwards: beforeCollection may already have reported most of the work as done.
+                analyzeStatus.setProgress(Math.max(analyzeStatus.getProgress(), (i + 1) * 99L / columnNames.size()));
                 GlobalStateMgr.getCurrentState().getAnalyzeMgr().addAnalyzeStatus(analyzeStatus);
             }
 
@@ -144,7 +144,7 @@ final class HistogramCollector {
     }
 
     /**
-     * Queries one column's most common values and buckets, waiting out a backend that is momentarily out
+     * Collects one column's most common values and buckets, waiting out a backend that is momentarily out
      * of memory when the flavour asks for it. A statistics query is tiny, so such a rejection is about
      * other work on that backend and stops being true on its own - see
      * {@link StatisticsCollectJob#awaitBackendMemory} for why the waiting is budgeted.
@@ -154,16 +154,7 @@ final class HistogramCollector {
         StatisticsCollectJob job = traits.job;
         for (int attempt = 0; ; attempt++) {
             try {
-                List<TStatisticData> mcv = job.queryStatisticSync(
-                        traits.buildMcvQuery(columnName), context, analyzeStatus);
-                Map<String, String> mostCommonValues = traits.buildMostCommonValues(mcv);
-
-                String bucketsQuery = traits.buildBucketsQuery(
-                        context, analyzeStatus, columnName, columnType, mostCommonValues);
-                String buckets = traits.singleResult(
-                        job.queryStatisticSync(bucketsQuery, context, analyzeStatus), columnName).histogram;
-
-                return new ColumnHistogram(buckets, buildMcvJson(mostCommonValues));
+                return traits.collectColumn(context, analyzeStatus, columnName, columnType);
             } catch (Exception e) {
                 if (!traits.waitsOutSharedMemoryPressure()
                         || attempt >= job.maxSharedMemoryRetries()
@@ -188,10 +179,6 @@ final class HistogramCollector {
 
     private String table() {
         return traits.table == null ? "?" : traits.table.getName();
-    }
-
-    /** One column's collected histogram, before it is turned into a buffered row. */
-    private record ColumnHistogram(String buckets, String mcvJson) {
     }
 
     /**

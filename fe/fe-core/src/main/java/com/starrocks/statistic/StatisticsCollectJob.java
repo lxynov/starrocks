@@ -18,6 +18,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Lists;
+import com.google.gson.JsonArray;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Function;
@@ -110,6 +111,8 @@ public abstract class StatisticsCollectJob {
     // budget the job stops waiting and degrades to the pre-retry behaviour: failures count, tolerance
     // decides, and the job ends soon enough to be re-triggered when the cluster has recovered.
     private long sharedMemoryBackoffSpentMs = 0;
+
+    private long statisticQueryCount = 0;
 
     protected final Database db;
     protected final Table table;
@@ -401,7 +404,26 @@ public abstract class StatisticsCollectJob {
         checkCancelled(analyzeStatus);
         calculateAndSetRemainingTimeout(context, analyzeStatus);
         setDefaultSessionVariable(context);
+        statisticQueryCount++;
         return new StatisticExecutor().executeStatisticDQL(context, sql);
+    }
+
+    /**
+     * Same as {@link #queryStatisticSync}, for a query whose rows have a shape of their own - see
+     * {@link StatisticExecutor#executeStatisticRowsDQL}.
+     */
+    protected List<JsonArray> queryStatisticRowsSync(
+            String sql, ConnectContext context, AnalyzeStatus analyzeStatus) throws DdlException {
+        checkCancelled(analyzeStatus);
+        calculateAndSetRemainingTimeout(context, analyzeStatus);
+        setDefaultSessionVariable(context);
+        statisticQueryCount++;
+        return new StatisticExecutor().executeStatisticRowsDQL(context, sql);
+    }
+
+    /** How many statistics queries this job has run so far; the statements that store the results do not count. */
+    long getStatisticQueryCount() {
+        return statisticQueryCount;
     }
 
     protected String getMinMaxFunction(Type columnType, String name, boolean isMax) {

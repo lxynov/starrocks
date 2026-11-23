@@ -113,6 +113,11 @@ public class StatsConstants {
     public static final String HISTOGRAM_MCV_SIZE = "histogram_mcv_size";
     public static final String HISTOGRAM_SAMPLE_RATIO = "histogram_sample_ratio";
     public static final String HISTOGRAM_COLLECT_BUCKET_NDV_MODE = "histogram_collect_bucket_ndv_mode";
+    public static final String HISTOGRAM_COLLECT_MODE = "histogram_collect_mode";
+
+    // What a native histogram collection reports about itself, next to the properties it ran under.
+    public static final String HISTOGRAM_COLLECT_QUERIES = "histogram_collect_queries";
+    public static final String HISTOGRAM_COLLECT_ELAPSED_MS = "histogram_collect_elapsed_ms";
 
     // SQL plan manager table
     public static final String SPM_BASELINE_TABLE_NAME = "spm_baselines";
@@ -177,6 +182,23 @@ public class StatsConstants {
         NONE,
         SAMPLE,
         HLL
+    }
+
+    public enum HistogramCollectMode {
+        // Sort the sampled values of one column at a time and cut the buckets on a single thread.
+        SORT,
+        // Build mergeable sketches for many columns at once, in multi-stage queries.
+        SKETCH;
+
+        /** Null unless |mode| names a mode, in any letter case. */
+        public static HistogramCollectMode parse(String mode) {
+            for (HistogramCollectMode candidate : values()) {
+                if (candidate.name().equalsIgnoreCase(mode)) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
     }
 
     public static Map<String, String> buildInitStatsProp() {

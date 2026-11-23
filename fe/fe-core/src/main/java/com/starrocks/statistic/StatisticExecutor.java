@@ -1188,12 +1188,32 @@ public class StatisticExecutor {
     }
 
     public List<TStatisticData> executeStatisticDQL(ConnectContext context, String sql) {
-        List<TResultBatch> sqlResult = executeDQL(context, sql);
+        List<TResultBatch> sqlResult = executeDQL(context, sql, TResultSinkType.STATISTIC);
         try {
             return deserializerStatisticData(sqlResult);
         } catch (TException e) {
             throw new SemanticException(e.getMessage());
         }
+    }
+
+    /**
+     * Runs a statistics query whose rows have a shape of their own instead of one of the versioned
+     * {@link TStatisticData} shapes, and returns the values of each row. A query that computes something for
+     * many columns at once has as many result columns as it has work to report, which no fixed shape fits.
+     *
+     * <p>A value is a JSON string, number or null, depending on the type of its result column.
+     */
+    public List<JsonArray> executeStatisticRowsDQL(ConnectContext context, String sql) {
+        List<TResultBatch> sqlResult = executeDQL(context, sql, TResultSinkType.HTTP_PROTOCAL);
+        List<JsonArray> rows = Lists.newArrayList();
+        for (TResultBatch batch : ListUtils.emptyIfNull(sqlResult)) {
+            for (ByteBuffer buffer : batch.getRows()) {
+                // Each row arrives as {"data":[<value>, ...]}.
+                String json = StandardCharsets.UTF_8.decode(buffer.duplicate()).toString();
+                rows.add(JsonParser.parseString(json).getAsJsonObject().get("data").getAsJsonArray());
+            }
+        }
+        return rows;
     }
 
     /**
@@ -1222,7 +1242,7 @@ public class StatisticExecutor {
                 tableId, sourcePartition, targetPartition);
     }
 
-    private List<TResultBatch> executeDQL(ConnectContext context, String sql) {
+    private List<TResultBatch> executeDQL(ConnectContext context, String sql, TResultSinkType resultSinkType) {
         context.setQueryId(UUIDUtil.genUUID());
         if (Config.enable_print_sql) {
             LOG.info("Begin to execute sql, type: Statistics collect，query id:{}, sql:{}", context.getQueryId(), sql);
@@ -1232,7 +1252,7 @@ public class StatisticExecutor {
         }
         Stopwatch watch = Stopwatch.createStarted();
         StatementBase parsedStmt = SqlParser.parseOneWithStarRocksDialect(sql, context.getSessionVariable());
-        ExecPlan execPlan = StatementPlanner.plan(parsedStmt, context, TResultSinkType.STATISTIC);
+        ExecPlan execPlan = StatementPlanner.plan(parsedStmt, context, resultSinkType);
         StmtExecutor executor = StmtExecutor.newInternalExecutor(context, parsedStmt);
         context.setExecutor(executor);
         context.getSessionVariable().setEnableMaterializedViewRewrite(false);

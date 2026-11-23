@@ -15,6 +15,7 @@
 package com.starrocks.statistic;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.starrocks.common.Config;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -23,9 +24,13 @@ import java.util.Map;
 /**
  * The analyze properties one histogram collection runs under, parsed once per collect() call.
  *
- * <p>All four are filled in together by AnalyzeStmtAnalyzer while analyzing the ANALYZE statement,
+ * <p>The first four are filled in together by AnalyzeStmtAnalyzer while analyzing the ANALYZE statement,
  * so they share a lifetime and are parsed as a unit. Only {@link NativeHistogramTraits} reads the
  * bucket-NDV mode; the external flavour carries it unused.
+ *
+ * <p>The collect mode is different: it is a property only when the statement names one. A job that does not
+ * follows {@link Config#histogram_collect_mode} as it is when the job runs, so a scheduled job picks up a
+ * change of the default.
  */
 final class HistogramCollectParams {
     private static final Logger LOG = LogManager.getLogger(HistogramCollectParams.class);
@@ -34,12 +39,14 @@ final class HistogramCollectParams {
     private final long bucketNum;
     private final long mcvSize;
     private final StatsConstants.HistogramCollectBucketNdvMode bucketNdvMode;
+    private final StatsConstants.HistogramCollectMode collectMode;
 
     HistogramCollectParams(Map<String, String> properties) {
         this.sampleRatio = Double.parseDouble(properties.get(StatsConstants.HISTOGRAM_SAMPLE_RATIO));
         this.bucketNum = Long.parseLong(properties.get(StatsConstants.HISTOGRAM_BUCKET_NUM));
         this.mcvSize = Long.parseLong(properties.get(StatsConstants.HISTOGRAM_MCV_SIZE));
         this.bucketNdvMode = parseBucketNdvMode(properties.get(StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE));
+        this.collectMode = resolveCollectMode(properties);
     }
 
     double sampleRatio() {
@@ -56,6 +63,28 @@ final class HistogramCollectParams {
 
     StatsConstants.HistogramCollectBucketNdvMode bucketNdvMode() {
         return bucketNdvMode;
+    }
+
+    StatsConstants.HistogramCollectMode collectMode() {
+        return collectMode;
+    }
+
+    /**
+     * The mode the statement asked for, or else the configured default. The analyzer rejects a property that
+     * names no mode, so only the configuration can be unusable here; it then counts as sort mode, the way an
+     * unusable bucket-NDV mode counts as none.
+     */
+    static StatsConstants.HistogramCollectMode resolveCollectMode(Map<String, String> properties) {
+        String mode = properties.get(StatsConstants.HISTOGRAM_COLLECT_MODE);
+        if (mode == null) {
+            mode = Config.histogram_collect_mode;
+        }
+        StatsConstants.HistogramCollectMode parsed = StatsConstants.HistogramCollectMode.parse(mode);
+        if (parsed == null) {
+            LOG.warn("Invalid histogram collect mode {}, using sort.", mode);
+            return StatsConstants.HistogramCollectMode.SORT;
+        }
+        return parsed;
     }
 
     /**

@@ -837,6 +837,23 @@ public class AnalyzeStmtTest {
     }
 
     @Test
+    public void testHistogramCollectMode() {
+        // A statement that names no mode stores none: the job follows the configuration when it runs.
+        AnalyzeStmt analyzeStmt = (AnalyzeStmt) analyzeSuccess("analyze table db.tbl update histogram on kk1");
+        Assertions.assertFalse(analyzeStmt.getProperties().containsKey(StatsConstants.HISTOGRAM_COLLECT_MODE));
+
+        analyzeStmt = (AnalyzeStmt) analyzeSuccess("analyze table db.tbl update histogram on kk1 " +
+                "properties(\"histogram_collect_mode\"=\"sketch\")");
+        Assertions.assertEquals("sketch", analyzeStmt.getProperties().get(StatsConstants.HISTOGRAM_COLLECT_MODE));
+        analyzeSuccess("analyze table db.tbl update histogram on kk1 properties(\"histogram_collect_mode\"=\"Sort\")");
+        analyzeSuccess("create analyze table db.tbl update histogram on kk1 " +
+                "properties(\"histogram_collect_mode\"=\"sketch\")");
+
+        analyzeFail("analyze table db.tbl update histogram on kk1 properties(\"histogram_collect_mode\"=\"kll\")",
+                "Property 'histogram_collect_mode' value must be 'sort' or 'sketch'");
+    }
+
+    @Test
     public void testDropStats() {
         String sql = "drop stats t0";
         DropStatsStmt dropStatsStmt = (DropStatsStmt) analyzeSuccess(sql);

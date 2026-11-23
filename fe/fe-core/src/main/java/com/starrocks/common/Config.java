@@ -3251,6 +3251,16 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true, comment = "Maximum buffered SQL size in bytes for one histogram statistics batch insert")
     public static long histogram_batch_insert_buffer_size = 20L * 1024 * 1024;
 
+    @ConfField(mutable = true, comment = "How the histogram of a native table is collected, unless the ANALYZE " +
+            "statement sets the histogram_collect_mode property. 'sort' sorts the sampled values of one column at a " +
+            "time and builds the buckets on a single thread. 'sketch' builds mergeable sketches (frequent items for " +
+            "the most common values, KLL for the buckets) for many columns in one multi-stage query")
+    public static String histogram_collect_mode = "sort";
+
+    @ConfField(mutable = true, comment = "In the sketch mode of histogram collection, the maximum number of " +
+            "fixed-size columns one query builds sketches for. String columns always get a query each")
+    public static int histogram_sketch_max_columns_per_query = 128;
+
     @ConfField(mutable = true, comment = "Use table sample instead of row-level bernoulli sample to collect statistics")
     public static boolean enable_use_table_sample_collect_statistics = true;
 

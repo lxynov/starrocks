@@ -92,6 +92,7 @@ public class AnalyzeStmtAnalyzer {
             StatsConstants.HISTOGRAM_MCV_SIZE,
             StatsConstants.HISTOGRAM_SAMPLE_RATIO,
             StatsConstants.HISTOGRAM_COLLECT_BUCKET_NDV_MODE,
+            StatsConstants.HISTOGRAM_COLLECT_MODE,
             StatsConstants.INIT_SAMPLE_STATS_JOB,
 
             StatsConstants.EXTERNAL_ANALYZE_SCAN_BYTES_CAP,
@@ -393,6 +394,20 @@ public class AnalyzeStmtAnalyzer {
                     if (properties.containsKey(key)) {
                         throw new SemanticException("Property '%s' is only supported for external tables", key);
                     }
+                }
+            }
+
+            if (properties.containsKey(StatsConstants.HISTOGRAM_COLLECT_MODE)) {
+                String mode = properties.get(StatsConstants.HISTOGRAM_COLLECT_MODE);
+                if (StatsConstants.HistogramCollectMode.parse(mode) == null) {
+                    throw new SemanticException("Property '%s' value must be 'sort' or 'sketch'",
+                            StatsConstants.HISTOGRAM_COLLECT_MODE);
+                }
+                // The histogram of an external table has a single way of being collected. Failing here beats
+                // accepting a mode that would then be ignored.
+                if (analyzeTable != null && !analyzeTable.isNativeTableOrMaterializedView()) {
+                    throw new SemanticException("Property '%s' is only supported for native tables",
+                            StatsConstants.HISTOGRAM_COLLECT_MODE);
                 }
             }
 

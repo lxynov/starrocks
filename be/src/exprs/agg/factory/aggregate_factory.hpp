@@ -33,6 +33,8 @@
 #include "exprs/agg/coverage_window.h"
 #include "exprs/agg/distinct.h"
 #include "exprs/agg/ds_hll_count_distinct.h"
+#include "exprs/agg/ds_kll_accumulate.h"
+#include "exprs/agg/ds_kll_combine.h"
 #include "exprs/agg/ds_theta_combine.h"
 #include "exprs/agg/ds_theta_count_distinct.h"
 #include "exprs/agg/ds_theta_intersect_cond.h"
@@ -203,6 +205,11 @@ public:
     static AggregateFunctionPtr MakeThetaSketchCombineAggregateFunction();
 
     static AggregateFunctionPtr MakeThetaSketchIntersectCondAggregateFunction();
+
+    template <LogicalType T>
+    static AggregateFunctionPtr MakeDsKllAccumulateAggregateFunction();
+
+    static AggregateFunctionPtr MakeDsKllCombineAggregateFunction();
 
     template <LogicalType T>
     static AggregateFunctionPtr MakeHllRawAggregateFunction();
@@ -439,6 +446,15 @@ inline AggregateFunctionPtr AggregateFactory::MakeThetaSketchCombineAggregateFun
 
 inline AggregateFunctionPtr AggregateFactory::MakeThetaSketchIntersectCondAggregateFunction() {
     return new ThetaSketchIntersectCondAggregateFunction();
+}
+
+template <LogicalType LT>
+AggregateFunctionPtr AggregateFactory::MakeDsKllAccumulateAggregateFunction() {
+    return new DsKllAccumulateAggregateFunction<LT>();
+}
+
+inline AggregateFunctionPtr AggregateFactory::MakeDsKllCombineAggregateFunction() {
+    return new DsKllCombineAggregateFunction();
 }
 
 template <LogicalType LT>

@@ -1,0 +1,61 @@
+---
+displayed_sidebar: docs
+description: "从序列化的 Apache DataSketches KLL 分位数草图中返回等高分桶的边界和排名，结果为 JSON 字符串。"
+products: [oss, enterprise, cloud, anywhere]
+---
+
+# ds_kll_estimate
+
+标量函数。读取序列化的 KLL 分位数草图（`VARBINARY`），以 JSON 字符串返回该草图所基于的值的等高分桶的边界和排名。
+
+草图使用 [`ds_kll_accumulate`](../aggregate-functions/ds_kll_accumulate.md) 构建，或使用 [`ds_kll_combine`](../aggregate-functions/ds_kll_combine.md) 合并得到。如果需要直接从列得到相同的结果，请使用 [`ds_kll_histogram`](../aggregate-functions/ds_kll_histogram.md)。
+
+## 语法
+
+```Haskell
+VARCHAR ds_kll_estimate(sketch, n)
+```
+
+### 参数
+
+- `sketch`: 包含使用 `ds_kll_accumulate` 构建的草图的 VARBINARY 值。
+- `n`: 分桶数量，取值为 1 到 65536 之间的 INT。
+
+## 返回值
+
+返回 VARCHAR 值，其内容为如下格式的 JSON 对象：
+
+```json
+{"count":N,"min":"v","max":"v","buckets":[["lower","upper",rank],...]}
+```
+
+- `count`: 草图所基于的值的数量。
+- `min` 和 `max`: 这些值的最小值和最大值，均为精确值。
+- `buckets`: 按升序排列的分桶。第一个分桶从最小值开始，最后一个分桶到最大值结束。其他每个分桶都从前一个分桶的上界开始，且不包含该上界。`rank` 是小于或等于该分桶上界的值占全部值的比例。
+
+值以字符串形式输出，格式与 `CAST(value AS VARCHAR)` 的返回结果相同。
+
+各分桶的上界是位于排名 1/n、2/n 等处的值。如果某个值出现得非常频繁，以至于多个这样的排名都落在该值上，它只会成为一个分桶的上界，因此返回的分桶数可能少于 `n`。
+
+如果 `sketch` 或 `n` 为 `NULL`，则返回 `NULL`。
+
+## 示例
+
+```sql
+-- orders 表有 1000 行数据，amount 的取值从 0.25 到 250.00。参见 ds_kll_accumulate。
+SELECT ds_kll_estimate(ds_kll_accumulate(amount), 4) FROM orders;
+```
+
+```plaintext
++-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| ds_kll_estimate(ds_kll_accumulate(amount), 4)                                                                                                       |
++-----------------------------------------------------------------------------------------------------------------------------------------------------+
+| {"count":1000,"min":"0.25","max":"250.00","buckets":[["0.25","62.50",0.251],["62.50","125.00",0.5],["125.00","187.25",0.75],["187.25","250.00",1]]} |
++-----------------------------------------------------------------------------------------------------------------------------------------------------+
+```
+
+表中的值多于草图保留的值，因此草图会对其采样，每次运行得到的边界和排名可能略有不同。
+
+## 关键词
+
+DS_KLL_ESTIMATE, DS_KLL_ACCUMULATE, DS_KLL_COMBINE, DS_KLL_HISTOGRAM

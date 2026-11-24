@@ -20,6 +20,7 @@ import com.starrocks.catalog.FunctionSet;
 import com.starrocks.catalog.combinator.AggStateUtils;
 import com.starrocks.sql.ast.expression.Expr;
 import com.starrocks.sql.ast.expression.FunctionCallExpr;
+import com.starrocks.sql.ast.expression.FunctionParams;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -42,6 +43,7 @@ public class SyntaxSugars {
                 .put(FunctionSet.DS_HLL_COMBINE, SyntaxSugars::dsHllCountDistinctUnion)
                 .put(FunctionSet.DS_HLL_ESTIMATE, SyntaxSugars::dsHllCountDistinctMerge)
                 .put(FunctionSet.DS_THETA_ACCUMULATE, SyntaxSugars::dsThetaCountDistinctStateUnion)
+                .put(FunctionSet.DS_KLL_HISTOGRAM, SyntaxSugars::dsKllHistogram)
                 .build();
     }
 
@@ -104,6 +106,29 @@ public class SyntaxSugars {
     private static FunctionCallExpr dsHllCountDistinctMerge(FunctionCallExpr call) {
         return new FunctionCallExpr(AggStateUtils.aggStateMergeFunctionName(FunctionSet.DS_HLL_COUNT_DISTINCT),
                 call.getChildren());
+    }
+
+    /*
+     * ds_kll_histogram(col, n)    -> ds_kll_estimate(ds_kll_accumulate(col), n)
+     * ds_kll_histogram(col, n, k) -> ds_kll_estimate(ds_kll_accumulate(col, k), n)
+     *
+     * The other way around from ds_hll_*: the backend implements the sketch functions, and the function that goes
+     * from a column straight to the result is the sugar. Any other number of arguments is left for the analyzer to
+     * reject.
+     */
+    private static FunctionCallExpr dsKllHistogram(FunctionCallExpr call) {
+        List<Expr> args = call.getChildren();
+        if (args.size() != 2 && args.size() != 3) {
+            return call;
+        }
+        List<Expr> accumulateArgs = Lists.newArrayList(args.get(0));
+        if (args.size() == 3) {
+            accumulateArgs.add(args.get(2));
+        }
+        FunctionCallExpr accumulate = new FunctionCallExpr(FunctionSet.DS_KLL_ACCUMULATE,
+                new FunctionParams(call.getParams().isDistinct(), accumulateArgs), call.getPos());
+        return new FunctionCallExpr(FunctionSet.DS_KLL_ESTIMATE,
+                new FunctionParams(false, Lists.newArrayList(accumulate, args.get(1))), call.getPos());
     }
 
     private static FunctionCallExpr dsThetaCountDistinctStateUnion(FunctionCallExpr call) {

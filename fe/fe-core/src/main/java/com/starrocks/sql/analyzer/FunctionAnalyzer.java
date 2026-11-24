@@ -96,6 +96,9 @@ import java.util.stream.Collectors;
 public class FunctionAnalyzer {
     public static final Pattern HAS_TIME_PART = Pattern.compile("^.*[HhIiklrSsT]+.*$");
     private static final Set<String> SUPPORTED_TGT_TYPES = Sets.newTreeSet(String.CASE_INSENSITIVE_ORDER);
+    // The k a KLL sketch accepts, as DsKllSketch in the backend checks it.
+    private static final long DS_KLL_MIN_K = 8;
+    private static final long DS_KLL_MAX_K = 65535;
 
     static {
         SUPPORTED_TGT_TYPES.addAll(Lists.newArrayList("HLL_8", "HLL_6", "HLL_4"));
@@ -783,6 +786,19 @@ public class FunctionAnalyzer {
                     throw new SemanticException(
                             fnName + " third  parameter'value should be in HLL_4/HLL_6/HLL_8");
                 }
+            }
+        }
+
+        // ds_kll_accumulate(col[, k])
+        if (fnName.equals(FunctionSet.DS_KLL_ACCUMULATE) && functionCallExpr.getChildren().size() == 2) {
+            Expr k = functionCallExpr.getChild(1);
+            if (!(k instanceof IntLiteral)) {
+                throw new SemanticException(fnName + " requires k to be an integer literal", k.getPos());
+            }
+            long value = ((IntLiteral) k).getLongValue();
+            if (value < DS_KLL_MIN_K || value > DS_KLL_MAX_K) {
+                throw new SemanticException(String.format("%s requires k to be between %d and %d, but got %d",
+                        fnName, DS_KLL_MIN_K, DS_KLL_MAX_K, value), k.getPos());
             }
         }
 
@@ -1759,6 +1775,13 @@ public class FunctionAnalyzer {
                                                       Type[] argumentTypes,
                                                       NodePosition pos) {
         Function fn = null;
+        // ds_kll_accumulate(col, k): look k up as the INT it is registered with, so that only the type of col picks
+        // the overload. A literal such as 200 is a SMALLINT, which rules out the exact match, and the first overload
+        // col can be cast to would win instead, such as (DOUBLE, INT) for a DECIMAL col.
+        if (FunctionSet.DS_KLL_ACCUMULATE.equals(fnName) && argumentTypes.length == 2
+                && argumentTypes[1].isIntegerType()) {
+            argumentTypes = new Type[] {argumentTypes[0], IntegerType.INT};
+        }
         if (DecimalV3FunctionAnalyzer.argumentTypeContainDecimalV3(fnName, argumentTypes)) {
             // Since the priority of decimal version is higher than double version (according functionId),
             // and in `Function.CompareMode.IS_NONSTRICT_SUPERTYPE_OF` mode, `Expr.getBuiltinFunction` always

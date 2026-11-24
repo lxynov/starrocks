@@ -52,6 +52,16 @@ struct HLLUnionBuilder {
     }
 };
 
+struct DsKllBuilder {
+    template <LogicalType lt>
+    void operator()(AggregateFuncResolver* resolver) {
+        if constexpr (ds_kll_supports<lt>) {
+            resolver->add_aggregate_mapping<lt, TYPE_VARBINARY, DsKllSketchState<DsKllSketchImpl<lt>>>(
+                    "ds_kll_accumulate", kWithoutWindow, AggregateFactory::MakeDsKllAccumulateAggregateFunction<lt>());
+        }
+    }
+};
+
 struct ApproxTopKBuilder {
     template <LogicalType lt>
     void operator()(AggregateFuncResolver* resolver) {
@@ -73,6 +83,7 @@ void AggregateFuncResolver::register_approx() {
 
     for (auto type : aggregate_types()) {
         type_dispatch_all(type, ApproxTopKBuilder(), this);
+        type_dispatch_all(type, DsKllBuilder(), this);
     }
     add_aggregate_mapping<TYPE_HLL, TYPE_HLL, HyperLogLog>("hll_union", kWithoutWindow,
                                                            AggregateFactory::MakeHllUnionAggregateFunction());
@@ -86,6 +97,9 @@ void AggregateFuncResolver::register_approx() {
 
     add_aggregate_mapping_variadic<TYPE_VARBINARY, TYPE_DOUBLE, ThetaSketchIntersectCondState>(
             "ds_theta_intersect_cond_agg", false, AggregateFactory::MakeThetaSketchIntersectCondAggregateFunction());
+
+    add_aggregate_mapping<TYPE_VARBINARY, TYPE_VARBINARY, DsKllSketchState<DsKllSketch>>(
+            "ds_kll_combine", kWithoutWindow, AggregateFactory::MakeDsKllCombineAggregateFunction());
 }
 
 } // namespace starrocks

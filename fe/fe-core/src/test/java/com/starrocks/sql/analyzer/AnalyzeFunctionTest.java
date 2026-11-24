@@ -14,6 +14,7 @@
 
 package com.starrocks.sql.analyzer;
 
+import com.starrocks.catalog.AggregateFunction;
 import com.starrocks.catalog.FunctionSet;
 import com.starrocks.sql.ast.QueryRelation;
 import com.starrocks.sql.ast.QueryStatement;
@@ -21,14 +22,17 @@ import com.starrocks.sql.ast.SelectRelation;
 import com.starrocks.sql.ast.expression.AnalyticExpr;
 import com.starrocks.sql.ast.expression.FloatLiteral;
 import com.starrocks.sql.ast.expression.FunctionCallExpr;
+import com.starrocks.sql.ast.expression.IntLiteral;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.type.ArrayType;
 import com.starrocks.type.GeoType;
 import com.starrocks.type.GeoTypeDescriptor;
+import com.starrocks.type.IntegerType;
 import com.starrocks.type.PrimitiveType;
 import com.starrocks.type.ScalarType;
 import com.starrocks.type.Type;
+import com.starrocks.type.VarbinaryType;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
 import org.junit.jupiter.api.Assertions;
@@ -736,6 +740,85 @@ public class AnalyzeFunctionTest {
         analyzeSuccess("select ds_hll_count_distinct(v_varbinary) from tbinary");
         analyzeSuccess("select ds_theta_count_distinct(v_varbinary) from tbinary");
         analyzeSuccess("select count(distinct v_varbinary) from tbinary");
+    }
+
+    @Test
+    public void testDsKll() {
+        // Every fixed-size ordered type has a sketch, and k does not change the value type it is built over.
+        for (String column : List.of("tb", "tc", "td", "te", "tf", "th", "ti", "tj")) {
+            AggregateFunction plain = analyzeAggregateFunction("select ds_kll_accumulate(" + column + ") from tall");
+            for (String k : List.of("8", "200", "65535")) {
+                AggregateFunction withK = analyzeAggregateFunction(
+                        "select ds_kll_accumulate(" + column + ", " + k + ") from tall");
+                Assertions.assertEquals(plain.getArgs()[0], withK.getArgs()[0], column + ", " + k);
+                Assertions.assertEquals(IntegerType.INT, withK.getArgs()[1], column + ", " + k);
+            }
+        }
+        analyzeSuccess("select ds_kll_estimate(ds_kll_accumulate(tc), 64) from tall");
+        analyzeSuccess("select ds_kll_estimate(ds_kll_combine(s), 8) from " +
+                "(select tb, ds_kll_accumulate(tj) as s from tall group by tb) t");
+        analyzeFail("select ds_kll_estimate(ds_kll_accumulate(tc)) from tall");
+        // ds_kll_estimate reads one sketch: it is a scalar function, not an aggregate.
+        analyzeSuccess("select ds_kll_estimate(s, 4) from (select tb, ds_kll_accumulate(tc) as s from tall group by tb) t");
+
+        // ds_kll_histogram(col, n[, k]) is syntax sugar for ds_kll_estimate(ds_kll_accumulate(col[, k]), n).
+        for (String sql : List.of("select ds_kll_histogram(tj, 64) from tall",
+                "select DS_KLL_HISTOGRAM(tj, 64, 200) from tall")) {
+            QueryStatement statement = (QueryStatement) analyzeSuccess(sql);
+            FunctionCallExpr estimate =
+                    (FunctionCallExpr) ((SelectRelation) statement.getQueryRelation()).getOutputExpression().get(0);
+            Assertions.assertEquals(FunctionSet.DS_KLL_ESTIMATE, estimate.getFunctionName(), sql);
+            Assertions.assertEquals(2, estimate.getChildren().size(), sql);
+            Assertions.assertEquals(64, ((IntLiteral) estimate.getChild(1)).getLongValue(), sql);
+            FunctionCallExpr accumulate = (FunctionCallExpr) estimate.getChild(0);
+            Assertions.assertEquals(FunctionSet.DS_KLL_ACCUMULATE, accumulate.getFunctionName(), sql);
+            Assertions.assertTrue(accumulate.getFn() instanceof AggregateFunction, sql);
+            Assertions.assertTrue(accumulate.getFn().getArgs()[0].isDecimalV3(), sql);
+            Assertions.assertEquals(sql.contains("200") ? 2 : 1, accumulate.getChildren().size(), sql);
+        }
+        analyzeSuccess("select tb, ds_kll_histogram(tc, 4) from tall group by tb");
+        analyzeFail("select ds_kll_histogram(tc) from tall");
+        analyzeFail("select ds_kll_histogram(tc, 4, 400, 1) from tall");
+        analyzeFail("select ds_kll_histogram(tc, 4, 7) from tall",
+                "ds_kll_accumulate requires k to be between 8 and 65535, but got 7");
+        // It takes a column, not a sketch: a sketch is read with ds_kll_estimate.
+        analyzeFail("select ds_kll_histogram(ds_kll_accumulate(tc), 4) from tall");
+
+        // k is an integer literal in the range the sketch accepts.
+        analyzeSuccess("select ds_kll_accumulate(tc, 8) from tall");
+        analyzeSuccess("select ds_kll_accumulate(tc, 65535) from tall");
+        analyzeFail("select ds_kll_accumulate(tc, 7) from tall",
+                "ds_kll_accumulate requires k to be between 8 and 65535, but got 7");
+        analyzeFail("select ds_kll_accumulate(tc, 65536) from tall",
+                "ds_kll_accumulate requires k to be between 8 and 65535, but got 65536");
+        analyzeFail("select ds_kll_accumulate(tc, -1) from tall", "ds_kll_accumulate requires k");
+        analyzeFail("select ds_kll_accumulate(tc, tc) from tall",
+                "ds_kll_accumulate requires k to be an integer literal");
+        analyzeFail("select ds_kll_accumulate(tc, 400, 1) from tall");
+        // The old names are gone.
+        analyzeFail("select ds_kll(tc) from tall");
+        analyzeFail("select ds_kll_union(s) from (select ds_kll_accumulate(tc) as s from tall) t");
+
+        // A decimal argument keeps its precision and scale, which the sketch records, and both the partial and
+        // the final result are the serialized sketch. k keeps its type.
+        for (String sql : List.of("select ds_kll_accumulate(tj) from tall", "select ds_kll_accumulate(tj, 200) from tall")) {
+            AggregateFunction fn = analyzeAggregateFunction(sql);
+            ScalarType argType = (ScalarType) fn.getArgs()[0];
+            Assertions.assertTrue(argType.isDecimalV3(), sql);
+            Assertions.assertEquals(9, argType.getScalarPrecision());
+            Assertions.assertEquals(3, argType.getScalarScale());
+            Assertions.assertEquals(VarbinaryType.VARBINARY, fn.getReturnType());
+            // An aggregate function keeps no intermediate type when it is the return type.
+            Assertions.assertNull(fn.getIntermediateType());
+        }
+    }
+
+    // The aggregate function the first output expression of |sql| resolves to.
+    private static AggregateFunction analyzeAggregateFunction(String sql) {
+        QueryStatement statement = (QueryStatement) analyzeSuccess(sql);
+        FunctionCallExpr call =
+                (FunctionCallExpr) ((SelectRelation) statement.getQueryRelation()).getOutputExpression().get(0);
+        return (AggregateFunction) call.getFn();
     }
 
     @Test

@@ -356,6 +356,11 @@ public class FunctionSet {
     public static final String DS_THETA_INTERSECT = "ds_theta_intersect";
     public static final String DS_THETA_A_NOT_B = "ds_theta_a_not_b";
     public static final String DS_THETA_INTERSECT_COND_AGG = "ds_theta_intersect_cond_agg";
+    public static final String DS_KLL_ACCUMULATE = "ds_kll_accumulate";
+    public static final String DS_KLL_COMBINE = "ds_kll_combine";
+    public static final String DS_KLL_ESTIMATE = "ds_kll_estimate";
+    // Syntax sugar for ds_kll_estimate(ds_kll_accumulate(col[, k]), n), see SyntaxSugars.
+    public static final String DS_KLL_HISTOGRAM = "ds_kll_histogram";
     public static final String APPROX_TOP_K = "approx_top_k";
     public static final String AVG = "avg";
     public static final String COUNT = "count";
@@ -745,6 +750,16 @@ public class FunctionSet {
                     .addAll(DateType.DATE_TYPES)
                     .build();
 
+    // The fixed-size, totally ordered types a KLL quantiles sketch can be built over.
+    private static final Set<Type> DS_KLL_TYPES =
+            ImmutableSet.<Type>builder()
+                    .addAll(IntegerType.INTEGER_TYPES)
+                    .addAll(FloatType.FLOAT_TYPES)
+                    .addAll(DecimalType.DECIMAL_TYPES)
+                    .add(DecimalType.DECIMALV2)
+                    .addAll(DateType.DATE_TYPES)
+                    .build();
+
     private static final Set<Type> MULTI_DISTINCT_COUNT_TYPES =
             ImmutableSet.<Type>builder()
                     .addAll(IntegerType.INTEGER_TYPES)
@@ -1006,6 +1021,9 @@ public class FunctionSet {
                     .add(DS_THETA_ACCUMULATE)
                     .add(DS_THETA_COMBINE)
                     .add(DS_THETA_INTERSECT_COND_AGG)
+                    // ds_kll_accumulate already returns its own state, which ds_kll_combine merges.
+                    .add(DS_KLL_ACCUMULATE)
+                    .add(DS_KLL_COMBINE)
                     // Functions with constant contexts in be are not supported.
                     .add(WINDOW_FUNNEL)
                     .add(APPROX_TOP_K)
@@ -1563,6 +1581,21 @@ public class FunctionSet {
                 true, false, true));
         // DS_THETA_ESTIMATE is registered as a scalar function via gensrc/script/functions.py.
         // It deserializes a compact theta sketch row-by-row and returns the estimate as DOUBLE.
+
+        // ds_kll_accumulate(col[, k]) builds a serialized KLL quantiles sketch, and ds_kll_combine(sketch) merges
+        // such sketches. DS_KLL_ESTIMATE, which reads one, is a scalar function registered via
+        // gensrc/script/functions.py, and DS_KLL_HISTOGRAM is syntax sugar over the two.
+        for (Type t : DS_KLL_TYPES) {
+            addBuiltin(AggregateFunction.createBuiltin(DS_KLL_ACCUMULATE,
+                    Lists.newArrayList(t), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                    false, false, false));
+            addBuiltin(AggregateFunction.createBuiltin(DS_KLL_ACCUMULATE,
+                    Lists.newArrayList(t, IntegerType.INT), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                    false, false, false));
+        }
+        addBuiltin(AggregateFunction.createBuiltin(DS_KLL_COMBINE,
+                Lists.newArrayList(VarbinaryType.VARBINARY), VarbinaryType.VARBINARY, VarbinaryType.VARBINARY,
+                false, false, false));
 
         // Sum
         registerBuiltinSumAggFunction(SUM);

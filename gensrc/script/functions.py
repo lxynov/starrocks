@@ -892,6 +892,10 @@ vectorized_functions = [
     [91102, 'ds_theta_a_not_b', False, False, 'VARBINARY', ['VARBINARY', 'VARBINARY'], 'DsThetaFunctions::ds_theta_a_not_b'],
     [91103, 'ds_theta_estimate', False, False, 'DOUBLE', ['VARBINARY'], 'DsThetaFunctions::ds_theta_estimate'],
 
+    # data sketches scalar functions that read a serialized KLL or frequent items sketch.
+    # ds_kll_histogram(col, n) is frontend syntax sugar for ds_kll_estimate(ds_kll_accumulate(col), n).
+    [91110, 'ds_kll_estimate', False, False, 'VARCHAR', ['VARBINARY', 'INT'], 'DsSketchFunctions::ds_kll_estimate'],
+
     # hash function
     [100010, 'murmur_hash3_32', True, False, 'INT', ['VARCHAR', '...'], 'HashFunctions::murmur_hash3_32'],
     [100028, 'xx_hash32', True, False, 'INT', ['VARCHAR', '...'], 'HashFunctions::xx_hash32'],

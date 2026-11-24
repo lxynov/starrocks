@@ -22,6 +22,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(EXPR_FILES
   agg/coverage_window.cpp
   agg/data_sketch/ds_hll.cpp
+  agg/data_sketch/ds_kll.cpp
+  agg/data_sketch/ds_sketch_utils.cpp
   agg/data_sketch/ds_theta.cpp
   agg/combinator/agg_state_utils.cpp
   agg/factory/aggregate_factory.cpp
@@ -143,6 +145,7 @@ set(EXPR_FILES
   table_function/java_udtf_function.cpp
   java_function_call_expr.cpp
   ds_theta_functions.cpp
+  ds_sketch_functions.cpp
 )
 
 if(STARROCKS_JIT_ENABLE)

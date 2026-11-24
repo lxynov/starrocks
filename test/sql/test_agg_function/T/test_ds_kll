@@ -1,0 +1,86 @@
+-- name: test_ds_kll
+CREATE TABLE t1 (
+  id BIGINT NOT NULL,
+  c_int INT,
+  c_double DOUBLE,
+  c_decimal DECIMAL(10, 2),
+  c_date DATE,
+  c_datetime DATETIME,
+  c_largeint LARGEINT,
+  c_bool BOOLEAN
+)
+DUPLICATE KEY(id)
+DISTRIBUTED BY HASH(id) BUCKETS 4;
+
+insert into t1
+select generate_series, generate_series, generate_series / 4, generate_series / 100,
+       date_add('2024-01-01', interval generate_series day),
+       date_add('2024-01-01 00:00:00', interval generate_series hour),
+       cast(generate_series as largeint) * 100000000000000000000, generate_series % 2 = 0
+from table(generate_series(1, 200));
+insert into t1 values (0, null, null, null, null, null, null, null);
+
+-- Below the default k = 400 values the sketch keeps every value, so the buckets are exact.
+select ds_kll_histogram(c_int, 4) from t1;
+-- ds_kll_histogram(col, n) is shorthand for ds_kll_estimate(ds_kll_accumulate(col), n).
+select ds_kll_estimate(ds_kll_accumulate(c_int), 4) from t1;
+select ds_kll_histogram(c_double, 2) from t1;
+select ds_kll_histogram(c_decimal, 2) from t1;
+select ds_kll_histogram(c_date, 2) from t1;
+select ds_kll_histogram(c_datetime, 2) from t1;
+select ds_kll_histogram(c_largeint, 2) from t1;
+select ds_kll_histogram(c_bool, 2) from t1;
+select ds_kll_histogram(id, 1) from t1;
+
+-- A group without a non-NULL value has no sketch.
+select ds_kll_accumulate(c_int) is null, ds_kll_histogram(c_int, 4) from t1 where id = 0;
+select ds_kll_accumulate(c_int) is null, ds_kll_histogram(c_int, 4) from t1 where id < 0;
+
+-- The result does not depend on how many stages the aggregation is split into.
+set new_planner_agg_stage = 1;
+select ds_kll_histogram(c_int, 4) from t1;
+set new_planner_agg_stage = 2;
+select ds_kll_histogram(c_int, 4) from t1;
+select id % 3 as g, ds_kll_histogram(c_int, 2) from t1 group by id % 3 order by g;
+set new_planner_agg_stage = 0;
+set streaming_preaggregation_mode = 'force_streaming';
+select id % 3 as g, ds_kll_histogram(c_int, 2) from t1 group by id % 3 order by g;
+set streaming_preaggregation_mode = 'auto';
+
+-- ds_kll_combine merges sketches that were built separately.
+select ds_kll_estimate(ds_kll_combine(s), 4) from (select id % 7 as g, ds_kll_accumulate(c_int) as s from t1 group by id % 7) t;
+select ds_kll_estimate(ds_kll_combine(s), 2) from (select id % 7 as g, ds_kll_accumulate(c_date) as s from t1 group by id % 7) t;
+
+-- A sketch can be stored and merged later.
+CREATE TABLE sketches (g INT, s VARBINARY) DUPLICATE KEY(g) DISTRIBUTED BY HASH(g) BUCKETS 1;
+insert into sketches select id % 5, ds_kll_accumulate(c_decimal) from t1 group by id % 5;
+select count(*), ds_kll_estimate(ds_kll_combine(s), 2) from sketches;
+
+-- Sketches of different value types do not merge.
+select ds_kll_combine(s) from (select ds_kll_accumulate(c_int) as s from t1 union all select ds_kll_accumulate(c_double) from t1) t;
+select ds_kll_estimate(cast('not a sketch' as varbinary), 4);
+select ds_kll_histogram(c_int, 0) from t1;
+
+-- k sets the size and the accuracy of the sketch. Below k values the buckets are exact, as with the default.
+select ds_kll_histogram(c_int, 4, 256) from t1;
+-- A smaller k samples, but the count, the minimum and the maximum stay exact.
+with h as (select ds_kll_histogram(c_int, 4, 8) as j from t1)
+select get_json_int(j, '$.count'), get_json_string(j, '$.min'), get_json_string(j, '$.max') from h;
+-- Sketches built with different k merge.
+select get_json_int(ds_kll_estimate(ds_kll_combine(s), 4), '$.count')
+from (select ds_kll_accumulate(c_int, 8) as s from t1 union all select ds_kll_accumulate(c_int) from t1) t;
+select ds_kll_accumulate(c_int, 7) from t1;
+select ds_kll_histogram(c_int, 4, 7) from t1;
+select ds_kll_accumulate(c_int, c_int) from t1;
+-- Above k values the sketch samples. The bounds stay within its rank error of the ranks asked for.
+CREATE TABLE t2 (id BIGINT NOT NULL, v BIGINT NOT NULL) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 4;
+insert into t2 select generate_series, (generate_series * 7919) % 1000000 from table(generate_series(1, 1000000));
+with h as (select ds_kll_histogram(v, 10) as j from t2)
+select get_json_int(j, '$.count'), get_json_string(j, '$.min'), get_json_string(j, '$.max'),
+       json_length(parse_json(j), '$.buckets'),
+       abs(cast(get_json_string(j, '$.buckets[4][1]') as bigint) - 500000) < 30000,
+       abs(get_json_double(j, '$.buckets[4][2]') - 0.5) < 0.03,
+       get_json_double(j, '$.buckets[9][2]') = 1
+from h;
+select length(ds_kll_accumulate(v)) < 65536 from t2;
+select length(ds_kll_accumulate(v, 8)) < length(ds_kll_accumulate(v)) from t2;
